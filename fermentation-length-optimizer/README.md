@@ -51,3 +51,6 @@ Running a command from another folder (e.g. your home directory) fails with
 
 Uploaded CSVs need one row per sample with the columns `batch_id, temperature,
 ph, dissolved_oxygen, inoculum_density, feed_rate, hour, titer, viability, hcp`.
+
+## How does it look like:
+<img width="1576" height="676" alt="image" src="https://github.com/user-attachments/assets/b74aa30a-ae1e-41eb-b127-47edb1337da7" />
