@@ -128,3 +128,55 @@ def test_all_z_columns_are_created(tiny, cfg):
     out, _ = standardise(tiny, cfg)
     for f in FEATURES:
         assert f"z_{f}" in out.columns
+
+
+# ---- reference.scope: per_batch ------------------------------------------------------
+
+def per_batch_cfg(cfg):
+    from dataclasses import replace
+    return replace(cfg, types={k: replace(t, scope="per_batch", first_n_cycles=5) for k, t in cfg.types.items()})
+
+
+def two_batches():
+    """Same type; batch Y starts 1.0 bar higher than batch X. Both then rise by the same amount."""
+    rows = []
+    for batch, offset in [("GB-X01", 0.0), ("GB-Y01", 1.0)]:
+        for a in range(1, 6):
+            rows.append(cycle(a, 1.0 + offset + 0.1 * (a % 2), 2.0 + 0.1 * a, 100.0 + a, 50.0 + a, batch=batch))
+        rows.append(cycle(50, 1.5 + offset, 2.3, 103.0, 53.0, batch=batch))
+    return prepare_cycles(pd.DataFrame(rows))
+
+
+def test_pooled_scope_penalises_a_batch_that_starts_high(cfg):
+    from dataclasses import replace
+    pooled = replace(cfg, types={k: replace(t, first_n_cycles=5) for k, t in cfg.types.items()})
+    out, _ = standardise(two_batches(), pooled)
+    late = out[out["resin_age"] == 50].set_index("gel_batch")["z_pt_80_percentile"]
+    assert late["GB-Y01"] > late["GB-X01"]
+
+
+def test_per_batch_scope_compares_each_batch_with_its_own_start(cfg):
+    out, stats = standardise(two_batches(), per_batch_cfg(cfg))
+    late = out[out["resin_age"] == 50].set_index("gel_batch")["z_pt_80_percentile"]
+    assert late["GB-Y01"] == pytest.approx(late["GB-X01"])   # same rise -> same z
+    pt = stats[stats["feature"] == "pt_80_percentile"].set_index("gel_batch")
+    assert pt.loc["GB-Y01", "centre"] - pt.loc["GB-X01", "centre"] == pytest.approx(1.0)
+    assert pt.loc["GB-Y01", "spread"] == pt.loc["GB-X01", "spread"]  # spread stays pooled
+    assert set(pt["source"]) == {"batch"}
+
+
+def test_per_batch_falls_back_to_pooled_when_a_batch_has_no_early_cycles(cfg):
+    df = two_batches()
+    late_only = df[df["gel_batch"] == "GB-X01"].assign(gel_batch="GB-Z01")
+    late_only = late_only[late_only["resin_age"] == 50]               # history starts at cycle 50
+    out, stats = standardise(pd.concat([df, late_only], ignore_index=True), per_batch_cfg(cfg))
+    z = stats[(stats["gel_batch"] == "GB-Z01") & (stats["feature"] == "pt_80_percentile")].iloc[0]
+    assert z["source"] == "pooled_fallback"
+
+
+def test_unknown_scope_is_rejected():
+    from gel_performance.config import ConfigError
+    raw = yaml.safe_load(CONFIG_PATH.read_text())
+    raw["chromatography_types"]["type_A"]["reference"]["scope"] = "global"
+    with pytest.raises(ConfigError, match="scope"):
+        parse_config(raw)

@@ -4,11 +4,12 @@
 # They are not real process limits. With real data each value would be agreed with
 # process experts and changed only through a reviewed, versioned update.
 
-config_version: "0.2.0"   # bump on ANY change; written into every output row for traceability
+config_version: "0.2.1"   # bump on ANY change; written into every output row for traceability
 # History:
 #   0.1.0  placeholder thresholds 70 / 40 for both types
 #   0.2.0  thresholds calibrated on odd-numbered (calibration) gel batches only:
 #          python -m gel_performance.validate --calibrate   (see README, Step 6)
+#   0.2.1  adds reference.scope (pooled | per_batch); value stays pooled, so results are unchanged
 
 # Global settings. They apply to every chromatography type.
 defaults:
@@ -24,6 +25,7 @@ chromatography_types:
     reference:
       first_n_cycles: 30      # early-life window: cycles 1..N of every gel batch form the baseline
       method: mean_std        # mean_std (classic z-score) or robust (median / MAD)
+      scope: pooled           # pooled (one baseline per type) or per_batch (each batch vs its own start)
     features:
       # direction: how to orient the z-score so that a higher value always means "worse"
       #   higher_is_worse -> z = (x - centre) / spread
@@ -45,6 +47,7 @@ chromatography_types:
     reference:
       first_n_cycles: 30
       method: mean_std
+      scope: pooled
     features:
       pt_80_percentile:          { direction: higher_is_worse, weight: 0.30 }
       max_pressure_displacement: { direction: higher_is_worse, weight: 0.30 }

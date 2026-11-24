@@ -23,6 +23,7 @@ FEATURES = [
 ]
 DIRECTIONS = {"higher_is_worse": +1, "lower_is_worse": -1}
 METHODS = {"mean_std", "robust"}
+SCOPES = {"pooled", "per_batch"}
 
 
 class ConfigError(ValueError):
@@ -51,6 +52,7 @@ class TypeConfig:
     composite_at_zero: float
     ok_min: float
     watch_min: float
+    scope: str = "pooled"  # pooled: one baseline per type ; per_batch: each batch's own early cycles
 
 
 @dataclass(frozen=True)
@@ -116,6 +118,7 @@ def _parse_type(name: str, t: dict) -> TypeConfig:
         composite_at_zero=float(t["score"]["composite_at_zero"]),
         ok_min=float(t["thresholds"]["ok_min"]),
         watch_min=float(t["thresholds"]["watch_min"]),
+        scope=t["reference"].get("scope", "pooled"),
     )
 
     if set(features) != set(FEATURES):
@@ -135,6 +138,8 @@ def _parse_type(name: str, t: dict) -> TypeConfig:
         raise ConfigError(f"{where}.reference.first_n_cycles must be >= 2 (need a spread)")
     if tc.method not in METHODS:
         raise ConfigError(f"{where}.reference.method must be one of {sorted(METHODS)}")
+    if tc.scope not in SCOPES:
+        raise ConfigError(f"{where}.reference.scope must be one of {sorted(SCOPES)}")
     if tc.composite_at_zero <= 0:
         raise ConfigError(f"{where}.score.composite_at_zero must be > 0")
     if not 0 <= tc.watch_min < tc.ok_min <= 100:
