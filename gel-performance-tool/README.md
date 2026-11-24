@@ -36,3 +36,50 @@ How the fake world behaves:
   Each batch keeps running 30–80 cycles beyond it, so we can measure late as well as early warnings.
 - **Data problems on purpose:** 3% of cycles are interrupted runs with 1–3 missing features (left as blank, never filled),
   and 16 sensor-spike outliers (a pressure ×1.5–2.5 or a flow ×0.3–0.5 for a single cycle).
+
+## Step 2 – Features and standardisation (`features.py`)
+
+Each cycle has five features: `pt_80_percentile`, `max_pressure_displacement`, `elution_flow_median`,
+`flow_median_displacement` and `resin_age`. `gel_batch` is only used for grouping and reporting, never as a number.
+
+**1. Reference window (what fresh resin looks like).** For each chromatography type, the cycles with
+`resin_age <= first_n_cycles` (30 by default, set in `config.yaml`) from *all* gel batches of that type are pooled.
+
+**2. Centre and spread per feature** from that window, ignoring missing values:
+
+| `reference.method` | centre | spread |
+|---|---|---|
+| `mean_std` (default) | mean | standard deviation |
+| `robust` | median | 1.4826 × MAD (median absolute deviation) – less affected by outliers |
+
+**3. Oriented z-score**, so that **a higher value always means "worse"**:
+
+```
+z = sign × (value − centre) / spread        sign = +1 for pressures (higher_is_worse)
+                                            sign = −1 for flows     (lower_is_worse)
+```
+
+z = +2 reads the same for every feature: "two reference spreads worse than fresh resin".
+
+**4. `resin_age` is handled differently.** Inside the reference window age only runs from 1 to 30, so its spread is tiny
+and a normal z-score would reach about +20 by cycle 300 and swamp everything else. Instead:
+`z_age = (resin_age − mean age in the window) / scale_cycles` – every 100 cycles (configurable) adds one unit of "worse".
+
+**5. Capping.** Each z is capped to ±`z_clip` (6) so one sensor spike cannot dominate the score.
+
+**6. Missing stays missing.** A missing raw value gives a missing z – never 0, never an average.
+
+### Why standardise per chromatography type?
+Different column set-ups run at different pressures and flows. In the synthetic data `type_B` runs at about twice the
+pressure of `type_A` (reference centre 2.70 vs 1.21 bar). If both were standardised together, every `type_B` cycle would
+look "high pressure = worn out" purely because of its set-up. Standardising per type compares each cycle only with
+fresh resin *of the same type*, so a z of +2 means the same amount of wear in both.
+
+### What it looks like on the synthetic data (average z by age band, type_A)
+
+| resin_age | pt_80 | max_p_disp | elution_flow | disp_flow | age |
+|---|---|---|---|---|---|
+| 1–99 | 0.27 | 0.28 | 0.15 | 0.14 | 0.34 |
+| 100–199 | 1.01 | 1.07 | 0.51 | 0.50 | 1.34 |
+| 200–299 | 2.44 | 2.51 | 1.28 | 1.28 | 2.34 |
+| 300+ | 4.44 | 4.50 | 2.84 | 2.82 | 3.21 |
