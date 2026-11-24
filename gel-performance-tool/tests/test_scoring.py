@@ -109,3 +109,25 @@ def test_score_cycles_end_to_end_on_z_frame():
     out = score_cycles(z_rows([0, 0, 0, 0, 0], [1, 1, 1, 1, 1], [np.nan, 2, 2, 2, 2]), make_cfg())
     assert out["flag"].tolist() == ["complete", "complete", "incomplete"]
     assert out["score"].tolist() == pytest.approx([100.0, 75.0, 50.0])
+
+
+# ---- report table -------------------------------------------------------------------
+
+def test_reason_names_the_main_driver_and_missing_feature():
+    from gel_performance.report import build_cycle_table
+
+    df = z_rows([np.nan, 2, 6, 0, 0])
+    df["cycle_end_time"] = "2024-01-01T00:00:00"
+    df["n_features_available"] = 4
+    df["missing_features"] = "pt_80_percentile"
+    for f in FEATURES:
+        if f != "resin_age":
+            df[f] = 1.0
+    table = build_cycle_table(score_cycles(df, make_cfg()), make_cfg())
+    row = table.iloc[0]
+    # weights 0.2, 0.2, 0.1, 0.1 -> 1/3, 1/3, 1/6, 1/6 ; composite = 2/3 + 2 = 2.667 ; score = 33.3
+    assert row["score"] == pytest.approx(100 * (1 - (8 / 3) / 4), abs=1e-3)
+    assert row["recommendation"] == REPLACE
+    assert "elution flow (-50 pts)" in row["reason"]
+    assert "scored without: pt_80_percentile" in row["reason"]
+    assert row["config_version"] == "test"

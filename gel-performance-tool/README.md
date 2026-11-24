@@ -83,3 +83,51 @@ fresh resin *of the same type*, so a z of +2 means the same amount of wear in bo
 | 100–199 | 1.01 | 1.07 | 0.51 | 0.50 | 1.34 |
 | 200–299 | 2.44 | 2.51 | 1.28 | 1.28 | 2.34 |
 | 300+ | 4.44 | 4.50 | 2.84 | 2.82 | 3.21 |
+
+## Step 3 – Score, contributions and recommendation (`scoring.py`, `report.py`)
+
+All weights, the score scaling and the thresholds come from `config.yaml`, separately per chromatography type.
+
+**Formula** (for one cycle, using its oriented z-scores `zᵢ` and config weights `wᵢ`):
+
+```
+available features   = features whose z is not missing
+re-normalised weight = w'ᵢ = wᵢ / Σ(w of available features)          # weights used always sum to 1
+composite            = S   = Σ w'ᵢ · zᵢ                                 # weighted "how much worse than fresh"
+points lost          = ptsᵢ = 100 · w'ᵢ · zᵢ / composite_at_zero        # contribution of each feature
+score                = clip(100 − Σ ptsᵢ, 0, 100) = clip(100 · (1 − S / composite_at_zero), 0, 100)
+```
+
+- A cycle that looks exactly like fresh reference resin (all z = 0) scores **100**. A cycle whose composite reaches
+  `composite_at_zero` (4.0) scores **0**. Cycles better than the reference are capped at 100.
+- The `pts_*` columns are the **contribution of each feature**: points it took off the score. They add up to
+  `100 − score`, unless the 0/100 cap was hit. A negative value means that feature was better than reference.
+
+Worked example (from `tests/test_scoring.py`): weights 0.4 / 0.2 / 0.2 / 0.1 / 0.1, every z = 1
+→ composite 1 → score 100 × (1 − 1/4) = **75**, with 10 / 5 / 5 / 2.5 / 2.5 points lost.
+
+**Missing features are never filled in.** If `pt_80_percentile` (weight 0.4) is missing, the other weights
+0.2 / 0.2 / 0.1 / 0.1 are re-scaled to 1/3 / 1/3 / 1/6 / 1/6 and the cycle is flagged **incomplete**.
+With fewer than `min_features_for_score` (3) features left, there is **no score** and the flag is **insufficient**.
+
+**Recommendation.** The score is smoothed with a rolling median over the last `smoothing_window` (5) scored cycles
+of the same gel batch, so a single noisy cycle cannot flip the advice. Then:
+
+| smoothed score | recommendation |
+|---|---|
+| ≥ `ok_min` | OK |
+| ≥ `watch_min` and < `ok_min` | WATCH |
+| < `watch_min` | REPLACE SOON |
+| no score | NO SCORE |
+
+**Output table** (one row per cycle): identifiers, `score`, `smoothed_score`, `recommendation`, `flag`,
+`missing_features`, a plain-English `reason`, `pts_*` (contributions), `w_*` (weights actually used), `z_*`,
+raw features, `composite` and `config_version`. Example `reason`:
+
+> REPLACE SOON: smoothed score 29 < 40. Main drivers: PT 80th pct pressure (-35 pts), max displacement pressure (-30 pts).
+> Incomplete cycle, scored without: elution_flow_median.
+
+A **batch summary** gives the latest status of each gel batch and the first cycle it was flagged REPLACE SOON.
+
+> The thresholds 70 / 40 are placeholders at this point. They are chosen in Step 6 on half of the gel batches
+> and validated on the other half.
