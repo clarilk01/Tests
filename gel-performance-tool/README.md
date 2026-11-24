@@ -6,7 +6,8 @@
 For every completed chromatography cycle, the tool computes a standardised feature set, combines it into a
 weighted performance score (0–100, higher = healthier gel) and recommends **OK / WATCH / REPLACE SOON**.
 
-*(This README grows with each build step.)*
+**Short tour:** [`docs/walkthrough.md`](docs/walkthrough.md) explains the whole project in 5 minutes, with the design
+choices and the questions they usually raise.
 
 ## Setup and quick start
 
@@ -181,15 +182,16 @@ python -m gel_performance.run --input data/synthetic/cycles.csv --output output 
 - *Nothing disappears silently* – rows dropped (unknown type, duplicate, no batch ID) and values treated as missing are
   counted in the log.
 
-**Tests** (`pytest`, 47 tests):
+**Tests** (`pytest`, 57 tests):
 
 | File | What it checks |
 |---|---|
 | `test_simulate.py` | Same seed → same data; ~3% missing; outliers present; pressures rise and flows fall with age |
 | `test_config.py` | Shipped config loads; bad weights, thresholds, directions and missing features are rejected |
 | `test_data.py` | Missing values flagged and not filled; text → missing; required columns; duplicates; row order |
-| `test_features.py` | Known-answer reference stats and z-scores; orientation of every feature; per-type reference; capping; robust method |
+| `test_features.py` | Known-answer reference stats and z-scores; orientation of every feature; per-type reference; capping; robust method; pooled vs per-batch scope and fallback |
 | `test_scoring.py` | Known-answer score and contributions; weight re-normalisation with a missing value; too few features; every threshold boundary; smoothing |
+| `test_validate.py` | True-class boundaries, batch split, balanced accuracy, calibration on a toy batch, warning lead time |
 | `test_end_to_end.py` | Full CLI run; outputs complete and consistent; run twice → identical files; shuffled input → identical files; error exit codes |
 
 ## Step 5 – Dashboard (`dashboard/app.py`)
