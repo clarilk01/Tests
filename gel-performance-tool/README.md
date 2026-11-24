@@ -31,6 +31,7 @@ src/gel_performance/
     scoring.py               Step 3  weighted 0–100 score, contributions, smoothing, recommendation
     report.py                Step 3  output table with reasons, batch summary
     run.py                   Step 4  command-line entry point, logging, atomic writes
+    validate.py              Step 6  calibration and validation against the simulator's truth
 dashboard/app.py             Step 5  Streamlit dashboard (reads the run outputs only)
 tests/                       pytest, known-answer and end-to-end tests
 ```
@@ -149,8 +150,8 @@ raw features, `composite` and `config_version`. Example `reason`:
 
 A **batch summary** gives the latest status of each gel batch and the first cycle it was flagged REPLACE SOON.
 
-> The thresholds 70 / 40 are placeholders at this point. They are chosen in Step 6 on half of the gel batches
-> and validated on the other half.
+> The example above used the placeholder thresholds 70 / 40 (config 0.1.0). Since config 0.2.0 the thresholds are
+> calibrated per type on half of the gel batches – see Step 6.
 
 ## Step 4 – Running it (`run.py`) and engineering practice
 
@@ -212,3 +213,107 @@ streamlit run dashboard/app.py
 - **What drives this cycle:** points lost per feature (the `pts_*` contributions). Hover shows the oriented z-score and
   the weight actually used. Missing features are listed as missing, not shown as zero.
 - **Tables:** current status per gel batch, and all cycles of the selected batch.
+
+## Step 6 – Validation (`validate.py`)
+
+> **This validation uses synthetic data.** The "truth" was built into the simulator by me, so the numbers below
+> show that the *method* behaves sensibly. They say **nothing** about how it would perform on a real process.
+
+**What counts as correct.** The simulator knows each gel batch's true replacement cycle: the first cycle where the
+noise-free pressure is 25% above that batch's own starting level. Every cycle gets a *true class* from
+`cycles_to_go = true_replacement_age − resin_age`:
+
+| cycles to go | true class |
+|---|---|
+| ≤ 25 (including past the true point) | REPLACE SOON |
+| 26 – 75 | WATCH |
+| > 75 | OK |
+
+The 25 / 75 horizons are my judgement of "how much warning is useful", not a standard.
+
+**No peeking.** Gel batches are split once, by number: odd-numbered batches (GB-A01, A03, A05, B01, B03, B05)
+are used to *choose* the thresholds; even-numbered batches are *held out* and used only to report results.
+Thresholds are chosen per type by a grid search that maximises **balanced accuracy** (the average hit rate over
+OK, WATCH and REPLACE SOON). Plain accuracy would reward saying "OK" all the time, because most cycles are OK.
+
+```bash
+python -m gel_performance.run --input data/synthetic/cycles.csv --output output --config config/config.yaml
+python -m gel_performance.validate --calibrate --out docs/validation_report.md
+```
+
+Calibrated thresholds (now in `config.yaml`, config_version 0.2.0): **type_A** OK ≥ 65, WATCH ≥ 31;
+**type_B** OK ≥ 53, WATCH ≥ 25.
+
+### Results on the held-out batches (full report: [`docs/validation_report.md`](docs/validation_report.md))
+
+| | type_A calibrated | type_A placeholder 70/40 | type_B calibrated | type_B placeholder 70/40 |
+|---|---|---|---|---|
+| Cycle-level agreement | 83.4% | 81.7% | 71.9% | 56.8% |
+| Balanced accuracy | 74.4% | 77.0% | 64.6% | 58.1% |
+| Batches warned in time | 2 of 3 (1 late by 2 cycles) | 3 of 3 | 3 of 3 | 1 of 3 (2 far too early) |
+
+First REPLACE SOON vs the true replacement point (calibrated thresholds; positive = cycles of warning):
+
+| gel batch | true replacement | first REPLACE SOON | warning (cycles) |
+|---|---|---|---|
+| GB-A02 | 348 | 311 | 37 |
+| GB-A04 | 340 | 331 | 9 |
+| GB-A06 | 352 | 354 | −2 (late) |
+| GB-B02 | 363 | 305 | 58 |
+| GB-B04 | 338 | 333 | 5 |
+| GB-B06 | 278 | 212 | 66 |
+
+**How to read this honestly:**
+- The score clearly tracks wear: on held-out batches it **never** called a truly OK cycle REPLACE SOON, or a truly
+  REPLACE SOON cycle OK. Most disagreements are one class apart, around the WATCH boundaries.
+- Calibration helped a lot for type_B, but for type_A it *lowered* held-out balanced accuracy slightly (77.0% → 74.4%).
+  With only three calibration batches per type the thresholds partly fit noise. I report this rather than tune it away.
+- Warning lead time varies widely (−2 to +66 cycles). The smoothed score is a health indicator, not a forecast of
+  *when* the replacement point will arrive.
+- **Why some type_B batches were flagged early:** GB-B06 started life with pressures above the type_B average (its score
+  was ~75 from the first cycles). The tool compares every batch with *pooled* fresh resin of its type, while the
+  simulator's truth measures the rise relative to *each batch's own start*. A lot that starts "high" therefore looks
+  worn earlier. This is the pooled-baseline trade-off chosen in Step 2: it treats a lot that starts at high pressure as
+  a risk in itself, at the cost of early warnings for such lots. A per-batch baseline would remove this effect.
+
+## Assumptions and limitations
+
+- **Synthetic data only.** The ageing curve, noise, batch effects, data problems and the definition of the "true"
+  replacement point were all invented by me. The method can only be as good as these assumptions, and good results
+  here do not transfer to a real process.
+- **The truth is circular in one way:** the simulator defines end of life by pressure, and pressures carry the most
+  weight in the score. A real resin may fail on yield, purity or peak shape first, which these features do not see.
+- **Small number of batches:** 6 per type, 3 for calibration. Thresholds and accuracy figures are noisy.
+- **The reference window assumes the first 30 cycles of every batch are healthy and present.** A batch whose early
+  cycles are missing from the data is still scored, but does not contribute to the baseline.
+- **The baseline is recomputed on every run.** When a new gel batch starts, its first cycles join the baseline and
+  older scores can shift slightly. A given input always gives the same output (idempotent), but outputs from
+  different days are not strictly comparable.
+- **Features are treated as independent in the weighted sum**, although the two pressures (and the two flows) are
+  correlated. In effect pressure gets more weight than its config weight suggests.
+- **Weights and the 0–100 scaling are set by hand,** not learned from data. Thresholds are the only calibrated part.
+- **The smoothed score lags** by about half the smoothing window (2–3 cycles); a sudden failure shows a cycle or two late.
+- **Re-normalising weights assumes the missing feature would have looked like the others.** A cycle missing a key
+  pressure signal may look healthier than it is; the "incomplete" flag is there so a person can judge.
+
+## What I would change with real data
+
+- **Data gaps:** first measure how often each feature is missing, and *why* (interrupted run, sensor dropout,
+  historian gap). Missingness that is linked to resin condition (e.g. runs aborted because of high pressure) must
+  not be scored with re-normalised weights. It should raise its own alert.
+- **KPI definitions per chromatography type:** agree with process experts exactly how each feature is computed
+  (which phase boundaries, which sensor, which percentile) for each column type. Add or swap features that reflect
+  product quality (step yield, HETP / asymmetry, impurity clearance), because those usually define end of life.
+- **A real "truth" for validation:** historical replacement decisions together with the reason for each (pressure
+  limit, yield loss, contamination). Without it, validation can only check consistency, not correctness.
+- **Versioned and reviewed config:** keep `config.yaml` under change control, with an owner, a review step and a
+  version that every output row already records. Re-calibrate thresholds only on a documented, held-out set.
+- **Frozen reference baselines:** store the reference statistics for each type in a versioned file, update them
+  deliberately (e.g. when a new resin supplier or column size is introduced), and score against that file, so that
+  scores from different days are comparable.
+- **Per-batch vs pooled baseline:** evaluate both on real data with experts. Possibly use pooled for absolute
+  limits and per-batch for "rate of decline".
+- **Monitoring the tool itself:** alert when the share of incomplete cycles, of capped z-scores, or of rows dropped
+  at loading rises. These often mean an upstream data change, not a resin problem.
+- **Operational fit:** read from the historian or data warehouse instead of a CSV, write results to a table the
+  site's existing dashboards can use, and add a validated-system workflow if the tool supports GMP decisions.
