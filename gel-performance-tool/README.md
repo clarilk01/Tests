@@ -276,6 +276,39 @@ First REPLACE SOON vs the true replacement point (calibrated thresholds; positiv
   worn earlier. This is the pooled-baseline trade-off chosen in Step 2: it treats a lot that starts at high pressure as
   a risk in itself, at the cost of early warnings for such lots. A per-batch baseline would remove this effect.
 
+### Pooled vs per-batch baseline (`reference.scope`)
+
+`config.yaml` has a `reference.scope` setting per chromatography type:
+- `pooled` (current default): every batch is compared with fresh resin of its type, pooled over all batches.
+  A lot that starts at higher pressure scores lower from the beginning.
+- `per_batch`: every batch is compared with **its own** first N cycles (the spread stays pooled, because 30 values
+  from one batch give a noisy spread). The score then measures *change since this lot was new*. A batch with fewer than
+  5 early-life values (e.g. its history starts at cycle 100) falls back to the pooled centre, with a log warning,
+  so worn resin never becomes its own "fresh" baseline.
+
+```bash
+python -m gel_performance.validate --compare-scopes --out docs/scope_comparison.md
+```
+
+Each scope is calibrated on the calibration batches and evaluated on the held-out batches
+([`docs/scope_comparison.md`](docs/scope_comparison.md)):
+
+| type | scope | calibrated OK / WATCH | agreement | balanced accuracy | batches in time | warning range (cycles) |
+|---|---|---|---|---|---|---|
+| type_A | pooled | 65 / 31 | 83.4% | 74.4% | 2 of 3 | −2 to 37 |
+| type_A | per_batch | 71 / 38 | 84.6% | 91.3% | 3 of 3 | 23 to 34 |
+| type_B | pooled | 53 / 25 | 71.9% | 64.6% | 3 of 3 | 5 to 66 |
+| type_B | per_batch | 59 / 17 | 85.2% | 89.7% | 3 of 3 | 19 to 36 |
+
+**Careful reading:** `per_batch` looks much better, but part of that is built in. The simulator *defines* the true
+replacement point as a rise relative to each batch's own start, which is exactly what `per_batch` measures. So this
+comparison favours `per_batch` by construction. Which baseline is right for a real process is a question for process
+experts:
+- per-batch answers "has this lot degraded?";
+- pooled also answers "is this lot running at a pressure we would not accept from fresh resin?".
+
+The default stays `pooled` until that question is answered.
+
 ## Assumptions and limitations
 
 - **Synthetic data only.** The ageing curve, noise, batch effects, data problems and the definition of the "true"
@@ -285,7 +318,10 @@ First REPLACE SOON vs the true replacement point (calibrated thresholds; positiv
   weight in the score. A real resin may fail on yield, purity or peak shape first, which these features do not see.
 - **Small number of batches:** 6 per type, 3 for calibration. Thresholds and accuracy figures are noisy.
 - **The reference window assumes the first 30 cycles of every batch are healthy and present.** A batch whose early
-  cycles are missing from the data is still scored, but does not contribute to the baseline.
+  cycles are missing from the data is still scored, but does not contribute to the baseline (and with `per_batch` it
+  falls back to the pooled centre).
+- **The validation truth favours one baseline.** It is defined per batch, so it favours `reference.scope: per_batch`
+  (see above).
 - **The baseline is recomputed on every run.** When a new gel batch starts, its first cycles join the baseline and
   older scores can shift slightly. A given input always gives the same output (idempotent), but outputs from
   different days are not strictly comparable.
@@ -311,8 +347,9 @@ First REPLACE SOON vs the true replacement point (calibrated thresholds; positiv
 - **Frozen reference baselines:** store the reference statistics for each type in a versioned file, update them
   deliberately (e.g. when a new resin supplier or column size is introduced), and score against that file, so that
   scores from different days are comparable.
-- **Per-batch vs pooled baseline:** evaluate both on real data with experts. Possibly use pooled for absolute
-  limits and per-batch for "rate of decline".
+- **Per-batch vs pooled baseline:** both are already switchable (`reference.scope`). Evaluate them on real data with
+  experts. Possibly use per-batch for "has this lot degraded?" and keep a pooled / absolute check for
+  "is the pressure acceptable at all?".
 - **Monitoring the tool itself:** alert when the share of incomplete cycles, of capped z-scores, or of rows dropped
   at loading rises. These often mean an upstream data change, not a resin problem.
 - **Operational fit:** read from the historian or data warehouse instead of a CSV, write results to a table the

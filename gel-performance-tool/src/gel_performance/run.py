@@ -28,7 +28,7 @@ from pathlib import Path
 import pandas as pd
 
 from . import __version__
-from .config import ConfigError, load_config
+from .config import Config, ConfigError, load_config
 from .data import DataError, load_cycles
 from .features import ReferenceWindowError, standardise
 from .report import build_batch_summary, build_cycle_table
@@ -40,6 +40,18 @@ DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "config.yaml"
 EXIT_OK, EXIT_CONFIG, EXIT_DATA, EXIT_UNEXPECTED = 0, 1, 2, 3
 
 
+def build_tables(cycles: pd.DataFrame, cfg: Config) -> dict[str, pd.DataFrame]:
+    """The in-memory pipeline: prepared cycles -> output tables (no files written)."""
+    standardised, ref_stats = standardise(cycles, cfg)
+    scored = score_cycles(standardised, cfg)
+    cycle_table = build_cycle_table(scored, cfg)
+    return {
+        "cycle_scores.csv": cycle_table,
+        "batch_summary.csv": build_batch_summary(cycle_table),
+        "reference_stats.csv": ref_stats.round(6),
+    }
+
+
 def run(input_path: Path, output_dir: Path, config_path: Path) -> dict[str, pd.DataFrame]:
     """Run the whole pipeline and write the outputs. Returns the tables (handy for tests)."""
     cfg = load_config(config_path)
@@ -48,15 +60,7 @@ def run(input_path: Path, output_dir: Path, config_path: Path) -> dict[str, pd.D
     cycles = load_cycles(input_path, known_types=set(cfg.types))
     if cycles.empty:
         raise DataError("No usable cycles in the input")
-    standardised, ref_stats = standardise(cycles, cfg)
-    scored = score_cycles(standardised, cfg)
-
-    tables = {
-        "cycle_scores.csv": build_cycle_table(scored, cfg),
-        "batch_summary.csv": None,
-        "reference_stats.csv": ref_stats.round(6),
-    }
-    tables["batch_summary.csv"] = build_batch_summary(tables["cycle_scores.csv"])
+    tables = build_tables(cycles, cfg)
     output_dir.mkdir(parents=True, exist_ok=True)
     for name, table in tables.items():
         _write_atomic(table, output_dir / name)

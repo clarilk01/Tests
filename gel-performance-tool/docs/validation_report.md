@@ -1,4 +1,4 @@
-# Validation report (synthetic data, config_version 0.2.0)
+# Validation report (synthetic data, config_version 0.2.1)
 
 ## type_A
 Calibrated on ['GB-A01', 'GB-A03', 'GB-A05']: ok_min = 65, watch_min = 31
