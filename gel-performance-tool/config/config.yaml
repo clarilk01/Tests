@@ -4,7 +4,11 @@
 # They are not real process limits. With real data each value would be agreed with
 # process experts and changed only through a reviewed, versioned update.
 
-config_version: "0.1.0"   # bump on ANY change; written into every output row for traceability
+config_version: "0.2.0"   # bump on ANY change; written into every output row for traceability
+# History:
+#   0.1.0  placeholder thresholds 70 / 40 for both types
+#   0.2.0  thresholds calibrated on odd-numbered (calibration) gel batches only:
+#          python -m gel_performance.validate --calibrate   (see README, Step 6)
 
 # Global settings. They apply to every chromatography type.
 defaults:
@@ -33,9 +37,9 @@ chromatography_types:
       resin_age:                 { direction: higher_is_worse, weight: 0.10, scale_cycles: 100 }
     score:
       composite_at_zero: 4.0  # weighted z-sum at which the score reaches 0 (score = 100 - penalties)
-    thresholds:
-      ok_min: 70              # smoothed score >= 70       -> OK
-      watch_min: 40           # 40 <= smoothed score < 70  -> WATCH ; below 40 -> REPLACE SOON
+    thresholds:               # calibrated on GB-A01, GB-A03, GB-A05 (v0.2.0)
+      ok_min: 65              # smoothed score >= 65       -> OK
+      watch_min: 31           # 31 <= smoothed score < 65  -> WATCH ; below 31 -> REPLACE SOON
 
   type_B:
     reference:
@@ -49,6 +53,6 @@ chromatography_types:
       resin_age:                 { direction: higher_is_worse, weight: 0.10, scale_cycles: 100 }
     score:
       composite_at_zero: 4.0
-    thresholds:
-      ok_min: 70
-      watch_min: 40
+    thresholds:               # calibrated on GB-B01, GB-B03, GB-B05 (v0.2.0)
+      ok_min: 53
+      watch_min: 25
