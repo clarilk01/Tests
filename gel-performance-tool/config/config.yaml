@@ -1,0 +1,61 @@
+# Gel Performance Tool - configuration
+#
+# ALL VALUES BELOW ARE ILLUSTRATIVE, chosen for the synthetic dataset in data/synthetic/.
+# They are not real process limits. With real data each value would be agreed with
+# process experts and changed only through a reviewed, versioned update.
+
+config_version: "0.2.1"   # bump on ANY change; written into every output row for traceability
+# History:
+#   0.1.0  placeholder thresholds 70 / 40 for both types
+#   0.2.0  thresholds calibrated on odd-numbered (calibration) gel batches only:
+#          python -m gel_performance.validate --calibrate   (see README, Step 6)
+#   0.2.1  adds reference.scope (pooled | per_batch); value stays pooled, so results are unchanged
+
+# Global settings. They apply to every chromatography type.
+defaults:
+  z_clip: 6.0                 # cap |z| at this value so a single extreme outlier cannot dominate the score
+  min_features_for_score: 3   # fewer available features than this -> no score, flag "insufficient"
+  smoothing_window: 5         # rolling median of the score over the last N cycles of a gel batch
+
+# One section per chromatography type. Each type has its own baseline, weights and thresholds,
+# because pressures and flows are on different scales for different column set-ups.
+chromatography_types:
+
+  type_A:
+    reference:
+      first_n_cycles: 30      # early-life window: cycles 1..N of every gel batch form the baseline
+      method: mean_std        # mean_std (classic z-score) or robust (median / MAD)
+      scope: pooled           # pooled (one baseline per type) or per_batch (each batch vs its own start)
+    features:
+      # direction: how to orient the z-score so that a higher value always means "worse"
+      #   higher_is_worse -> z = (x - centre) / spread
+      #   lower_is_worse  -> z = (centre - x) / spread
+      # weights must add up to 1.0 (checked when the config is loaded)
+      pt_80_percentile:          { direction: higher_is_worse, weight: 0.30 }
+      max_pressure_displacement: { direction: higher_is_worse, weight: 0.25 }
+      elution_flow_median:       { direction: lower_is_worse,  weight: 0.20 }
+      flow_median_displacement:  { direction: lower_is_worse,  weight: 0.15 }
+      # resin_age is not z-scored (see README): z = (age - mean age in window) / scale_cycles
+      resin_age:                 { direction: higher_is_worse, weight: 0.10, scale_cycles: 100 }
+    score:
+      composite_at_zero: 4.0  # weighted z-sum at which the score reaches 0 (score = 100 - penalties)
+    thresholds:               # calibrated on GB-A01, GB-A03, GB-A05 (v0.2.0)
+      ok_min: 65              # smoothed score >= 65       -> OK
+      watch_min: 31           # 31 <= smoothed score < 65  -> WATCH ; below 31 -> REPLACE SOON
+
+  type_B:
+    reference:
+      first_n_cycles: 30
+      method: mean_std
+      scope: pooled
+    features:
+      pt_80_percentile:          { direction: higher_is_worse, weight: 0.30 }
+      max_pressure_displacement: { direction: higher_is_worse, weight: 0.30 }
+      elution_flow_median:       { direction: lower_is_worse,  weight: 0.15 }
+      flow_median_displacement:  { direction: lower_is_worse,  weight: 0.15 }
+      resin_age:                 { direction: higher_is_worse, weight: 0.10, scale_cycles: 100 }
+    score:
+      composite_at_zero: 4.0
+    thresholds:               # calibrated on GB-B01, GB-B03, GB-B05 (v0.2.0)
+      ok_min: 53
+      watch_min: 25
