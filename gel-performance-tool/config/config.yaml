@@ -1,0 +1,54 @@
+# Gel Performance Tool - configuration
+#
+# ALL VALUES BELOW ARE ILLUSTRATIVE, chosen for the synthetic dataset in data/synthetic/.
+# They are not real process limits. With real data each value would be agreed with
+# process experts and changed only through a reviewed, versioned update.
+
+config_version: "0.1.0"   # bump on ANY change; written into every output row for traceability
+
+# Global settings. They apply to every chromatography type.
+defaults:
+  z_clip: 6.0                 # cap |z| at this value so a single extreme outlier cannot dominate the score
+  min_features_for_score: 3   # fewer available features than this -> no score, flag "insufficient"
+  smoothing_window: 5         # rolling median of the score over the last N cycles of a gel batch
+
+# One section per chromatography type. Each type has its own baseline, weights and thresholds,
+# because pressures and flows are on different scales for different column set-ups.
+chromatography_types:
+
+  type_A:
+    reference:
+      first_n_cycles: 30      # early-life window: cycles 1..N of every gel batch form the baseline
+      method: mean_std        # mean_std (classic z-score) or robust (median / MAD)
+    features:
+      # direction: how to orient the z-score so that a higher value always means "worse"
+      #   higher_is_worse -> z = (x - centre) / spread
+      #   lower_is_worse  -> z = (centre - x) / spread
+      # weights must add up to 1.0 (checked when the config is loaded)
+      pt_80_percentile:          { direction: higher_is_worse, weight: 0.30 }
+      max_pressure_displacement: { direction: higher_is_worse, weight: 0.25 }
+      elution_flow_median:       { direction: lower_is_worse,  weight: 0.20 }
+      flow_median_displacement:  { direction: lower_is_worse,  weight: 0.15 }
+      # resin_age is not z-scored (see README): z = (age - mean age in window) / scale_cycles
+      resin_age:                 { direction: higher_is_worse, weight: 0.10, scale_cycles: 100 }
+    score:
+      composite_at_zero: 4.0  # weighted z-sum at which the score reaches 0 (score = 100 - penalties)
+    thresholds:
+      ok_min: 70              # smoothed score >= 70       -> OK
+      watch_min: 40           # 40 <= smoothed score < 70  -> WATCH ; below 40 -> REPLACE SOON
+
+  type_B:
+    reference:
+      first_n_cycles: 30
+      method: mean_std
+    features:
+      pt_80_percentile:          { direction: higher_is_worse, weight: 0.30 }
+      max_pressure_displacement: { direction: higher_is_worse, weight: 0.30 }
+      elution_flow_median:       { direction: lower_is_worse,  weight: 0.15 }
+      flow_median_displacement:  { direction: lower_is_worse,  weight: 0.15 }
+      resin_age:                 { direction: higher_is_worse, weight: 0.10, scale_cycles: 100 }
+    score:
+      composite_at_zero: 4.0
+    thresholds:
+      ok_min: 70
+      watch_min: 40
