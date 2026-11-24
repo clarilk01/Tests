@@ -31,6 +31,7 @@ src/gel_performance/
     scoring.py               Step 3  weighted 0–100 score, contributions, smoothing, recommendation
     report.py                Step 3  output table with reasons, batch summary
     run.py                   Step 4  command-line entry point, logging, atomic writes
+dashboard/app.py             Step 5  Streamlit dashboard (reads the run outputs only)
 tests/                       pytest, known-answer and end-to-end tests
 ```
 
@@ -189,3 +190,25 @@ python -m gel_performance.run --input data/synthetic/cycles.csv --output output 
 | `test_features.py` | Known-answer reference stats and z-scores; orientation of every feature; per-type reference; capping; robust method |
 | `test_scoring.py` | Known-answer score and contributions; weight re-normalisation with a missing value; too few features; every threshold boundary; smoothing |
 | `test_end_to_end.py` | Full CLI run; outputs complete and consistent; run twice → identical files; shuffled input → identical files; error exit codes |
+
+## Step 5 – Dashboard (`dashboard/app.py`)
+
+```bash
+python -m gel_performance.run --input data/synthetic/cycles.csv --output output --config config/config.yaml
+streamlit run dashboard/app.py
+```
+
+![Dashboard: gel batch GB-A01 at cycle 250, WATCH](docs/screenshots/dashboard_watch.png)
+
+- **Reads only the run outputs** (`output/cycle_scores.csv`, `batch_summary.csv`) and never recomputes scores,
+  so the dashboard always shows exactly what the scheduled job produced. If there is no output yet, it shows the
+  command to run.
+- **Sidebar:** chromatography type, gel batch and cycle (defaults to the latest cycle). A specific cycle can be
+  shared as a link, e.g. `http://localhost:8501/?batch=GB-A01&age=250`.
+- **Recommendation card:** OK / WATCH / REPLACE SOON (always icon + label, never colour alone), smoothed score,
+  the cycle's own score, the data flag and the plain-English reason.
+- **Score vs resin age:** smoothed score per gel batch of the selected type. The selected batch is highlighted,
+  the others are grey context, and the OK / WATCH / REPLACE SOON bands come from the config thresholds.
+- **What drives this cycle:** points lost per feature (the `pts_*` contributions). Hover shows the oriented z-score and
+  the weight actually used. Missing features are listed as missing, not shown as zero.
+- **Tables:** current status per gel batch, and all cycles of the selected batch.
