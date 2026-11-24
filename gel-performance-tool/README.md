@@ -8,11 +8,30 @@ weighted performance score (0–100, higher = healthier gel) and recommends **OK
 
 *(This README grows with each build step.)*
 
-## Setup
+## Setup and quick start
 
 ```bash
 cd gel-performance-tool
 pip install -e ".[dashboard,dev]"
+python -m gel_performance.simulate --out data/synthetic --seed 42          # (re)create the synthetic data
+python -m gel_performance.run --input data/synthetic/cycles.csv --output output --config config/config.yaml
+pytest
+```
+
+## Project structure
+
+```
+config/config.yaml           weights, reference window, score scaling, thresholds – one section per chromatography type
+data/synthetic/              generated data (input + hidden truth used only for validation)
+src/gel_performance/
+    simulate.py              Step 1  synthetic data generator
+    config.py                load and check config.yaml
+    data.py                  read and check the input; flag missing values, never fill them
+    features.py              Step 2  per-type reference window, oriented z-scores
+    scoring.py               Step 3  weighted 0–100 score, contributions, smoothing, recommendation
+    report.py                Step 3  output table with reasons, batch summary
+    run.py                   Step 4  command-line entry point, logging, atomic writes
+tests/                       pytest, known-answer and end-to-end tests
 ```
 
 ## Step 1 – Synthetic data (`data/synthetic/`)
@@ -131,3 +150,42 @@ A **batch summary** gives the latest status of each gel batch and the first cycl
 
 > The thresholds 70 / 40 are placeholders at this point. They are chosen in Step 6 on half of the gel batches
 > and validated on the other half.
+
+## Step 4 – Running it (`run.py`) and engineering practice
+
+```bash
+python -m gel_performance.run --input data/synthetic/cycles.csv --output output --config config/config.yaml
+```
+
+| Output file | Contents |
+|---|---|
+| `cycle_scores.csv` | One row per cycle: score, smoothed score, recommendation, flag, reason, contributions, weights, z-scores |
+| `batch_summary.csv` | Latest status per gel batch and the first cycle flagged REPLACE SOON |
+| `reference_stats.csv` | The early-life baseline (centre, spread, n) used for each type and feature |
+| `run.log` | Appended every run: input file and fingerprint, rows read, incomplete / insufficient counts, results, errors |
+
+**Scheduling hourly** (example cron line; use absolute paths and always pass `--config` explicitly):
+
+```
+0 * * * * cd /path/to/gel-performance-tool && python -m gel_performance.run --input /data/cycles.csv --output /data/gel_output --config config/config.yaml
+```
+
+**Safe for a scheduler:**
+- *Idempotent* – the CSV outputs depend only on the input and the config. There are no timestamps inside them, rows
+  are sorted in a fixed order, and the same input (even with its rows shuffled) gives byte-identical files. Tested.
+- *Atomic writes* – each file is written to a temporary name and then renamed, so a crash never leaves a half-written file.
+- *Clear exit codes* – `0` success, `1` config problem, `2` input data problem, `3` unexpected error (full traceback in
+  `run.log`), so the scheduler can alert on failures.
+- *Nothing disappears silently* – rows dropped (unknown type, duplicate, no batch ID) and values treated as missing are
+  counted in the log.
+
+**Tests** (`pytest`, 47 tests):
+
+| File | What it checks |
+|---|---|
+| `test_simulate.py` | Same seed → same data; ~3% missing; outliers present; pressures rise and flows fall with age |
+| `test_config.py` | Shipped config loads; bad weights, thresholds, directions and missing features are rejected |
+| `test_data.py` | Missing values flagged and not filled; text → missing; required columns; duplicates; row order |
+| `test_features.py` | Known-answer reference stats and z-scores; orientation of every feature; per-type reference; capping; robust method |
+| `test_scoring.py` | Known-answer score and contributions; weight re-normalisation with a missing value; too few features; every threshold boundary; smoothing |
+| `test_end_to_end.py` | Full CLI run; outputs complete and consistent; run twice → identical files; shuffled input → identical files; error exit codes |
