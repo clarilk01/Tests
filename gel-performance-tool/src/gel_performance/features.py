@@ -1,39 +1,33 @@
-"""Step 2 - Standardise every feature against an early-life reference, oriented so higher = worse.
+"""Build the three standardised features the decision tree uses.
 
-For each chromatography type separately:
+Per cycle:
+    z_resin_age               - gel age
+    z_rm_elution_flow_median  - rolling mean of elution flow
+    z_rm_pt_80_percentile     - rolling mean of the elution pressure (PT 80th percentile)
 
-1. Reference window: all cycles with resin_age <= first_n_cycles, pooled over every gel batch
-   of that type. This is "what fresh resin looks like" for that column set-up.
-2. Reference statistics per feature:
+Steps:
+1. Rolling mean of each KPI over the last `rolling_window` cycles of the SAME gel batch (ordered by
+   resin_age). A missing value is simply left out of the average; it is never filled in. If the
+   whole window is missing, the rolling mean is missing too.
+   Why a rolling mean? It smooths cycle-to-cycle noise, so one odd run cannot flip the decision.
+2. Reference window (what fresh resin looks like): cycles with resin_age <= first_n_cycles.
+   Statistics come from the RAW KPI values in that window:
      method "mean_std": centre = mean,   spread = standard deviation
-     method "robust":   centre = median, spread = 1.4826 * MAD  (MAD = median absolute deviation;
-                        the 1.4826 factor makes it comparable to a standard deviation for normal data)
-   Missing values are ignored when computing these statistics.
-3. Oriented z-score:
-     z = sign * (value - centre) / spread
-   where sign = +1 for "higher_is_worse" (pressures) and -1 for "lower_is_worse" (flows).
-   So z = +2 always means "2 reference spreads worse than fresh resin", whatever the feature.
-4. resin_age is a special case: inside the reference window it only runs 1..N, so its spread is
-   tiny and a normal z-score would explode (about +20 by cycle 300). Instead:
-     z_age = (resin_age - centre of ages in the window) / scale_cycles
-   i.e. every `scale_cycles` cycles beyond the reference adds one unit of "worse".
-5. Scope (config `reference.scope`):
-     pooled    - one centre per type and feature, from the early cycles of ALL batches of that type.
-                 A lot that starts at higher pressure than average shows a lower score from day one.
-     per_batch - each gel batch gets its OWN centre, from its own first N cycles; the spread is still the
-                 pooled one (30 values from one batch give a noisy spread). The score then measures change
-                 since that batch was new. If a batch has fewer than MIN_BATCH_REF_CYCLES early values for a
-                 feature (e.g. its history starts at cycle 100), it falls back to the pooled centre and this is
-                 logged - otherwise worn resin would become its own "fresh" baseline.
-6. Every z is capped to [-z_clip, +z_clip] so that a single sensor spike cannot dominate.
+     method "robust":   centre = median, spread = 1.4826 * MAD
+   scope "pooled":    one centre per chromatography type (all batches of the type together)
+   scope "per_batch": each batch's own centre; spread still pooled (a batch with fewer than
+                      MIN_BATCH_REF_CYCLES early values falls back to the pooled centre, logged)
+3. Oriented z-score of the rolling mean:
+     z = sign * (rolling mean - centre) / spread      sign = +1 higher_is_worse, -1 lower_is_worse
+   so a higher z always means "worse than fresh resin". The spread is the single-cycle spread,
+   so z reads as "how many single-cycle spreads the rolling mean has moved".
+4. Gel age: z = (resin_age - mean age in the reference window) / resin_age_scale_cycles.
+   (A normal z-score of age would explode, because ages in the window only run 1..N.)
+5. Every z is capped to [-z_clip, +z_clip].
 
-Why per chromatography type? Different column set-ups run at different pressures and flows
-(in the synthetic data type_B runs at about 2x the pressure of type_A). If both were standardised
-together, every type_B cycle would look "high pressure = worse" simply because of its set-up,
-not because its resin is ageing. Standardising per type compares each cycle with fresh resin
-of the same type.
-
-Missing raw values stay missing: their z-score is NaN, never 0 or any other guess.
+Why per chromatography type? Different column set-ups run at different pressures and flows (type_B
+runs at about twice the pressure of type_A). Standardising per type compares every cycle with fresh
+resin of the SAME type, so one decision tree can serve both types.
 """
 
 from __future__ import annotations
@@ -43,7 +37,7 @@ import logging
 import numpy as np
 import pandas as pd
 
-from .config import FEATURES, Config, TypeConfig
+from .config import KPIS, Config, TypeConfig
 
 log = logging.getLogger(__name__)
 
@@ -55,57 +49,23 @@ class ReferenceWindowError(ValueError):
     """Raised when a reference window is too small or has no spread."""
 
 
-def z_col(feature: str) -> str:
-    return f"z_{feature}"
+def rm_col(kpi: str) -> str:
+    return f"rm_{kpi}"
 
 
-def reference_stats(df: pd.DataFrame, tc: TypeConfig) -> pd.DataFrame:
-    """Centre and spread of each feature in the early-life window of ONE chromatography type.
-
-    Returns a table with one row per feature: centre, spread, n (number of reference values used).
-    """
-    ref = df[(df["chromatography_type"] == tc.name) & (df["resin_age"] <= tc.first_n_cycles)]
-    rows = []
-    for feature in FEATURES:
-        values = ref[feature].dropna().to_numpy(dtype=float)
-        if len(values) < 2:
-            raise ReferenceWindowError(
-                f"{tc.name}: only {len(values)} reference value(s) for {feature}; "
-                f"need at least 2 cycles with resin_age <= {tc.first_n_cycles}"
-            )
-        centre, spread = _centre_spread(values, tc.method)
-        if feature == "resin_age":
-            spread = tc.features["resin_age"].scale_cycles
-        if not np.isfinite(spread) or spread <= 0:
-            raise ReferenceWindowError(f"{tc.name}: reference spread of {feature} is zero; cannot standardise")
-        rows.append({"chromatography_type": tc.name, "gel_batch": "ALL", "feature": feature,
-                     "centre": centre, "spread": spread, "n": len(values), "source": "pooled"})
-    return pd.DataFrame(rows)
+def z_col(name: str) -> str:
+    return f"z_{name}"
 
 
-def batch_reference_stats(df: pd.DataFrame, tc: TypeConfig, pooled: pd.DataFrame) -> pd.DataFrame:
-    """Per-batch centres (scope per_batch). Spread comes from the pooled table; centre falls back to pooled
-    when a batch has fewer than MIN_BATCH_REF_CYCLES reference values for a feature."""
-    sub = df[df["chromatography_type"] == tc.name]
-    pooled = pooled.set_index("feature")
-    rows = []
-    for batch, g in sub.groupby("gel_batch", sort=True):
-        ref = g[g["resin_age"] <= tc.first_n_cycles]
-        for feature in FEATURES:
-            values = ref[feature].dropna().to_numpy(dtype=float)
-            if len(values) >= MIN_BATCH_REF_CYCLES:
-                centre, source = _centre_spread(values, tc.method)[0], "batch"
-            else:
-                centre, source = pooled.loc[feature, "centre"], "pooled_fallback"
-            rows.append({"chromatography_type": tc.name, "gel_batch": batch, "feature": feature,
-                         "centre": centre, "spread": pooled.loc[feature, "spread"],
-                         "n": len(values), "source": source})
-    stats = pd.DataFrame(rows)
-    fallback = stats[stats["source"] == "pooled_fallback"]
-    for batch, f in fallback.groupby("gel_batch")["feature"]:
-        log.warning("%s: batch %s has < %d early-life values for %s; pooled centre used",
-                    tc.name, batch, MIN_BATCH_REF_CYCLES, ", ".join(f))
-    return stats
+def add_rolling_means(df: pd.DataFrame, window: int) -> pd.DataFrame:
+    """Rolling mean of each KPI within each gel batch, ordered by resin_age. NaN values are skipped."""
+    out = df.sort_values(["gel_batch", "resin_age"], kind="mergesort").copy()
+    for kpi in KPIS:
+        out[rm_col(kpi)] = (
+            out.groupby("gel_batch", sort=False)[kpi]
+            .transform(lambda s: s.rolling(window, min_periods=1).mean())
+        )
+    return out.loc[df.index]  # back to the caller's row order
 
 
 def _centre_spread(values: np.ndarray, method: str) -> tuple[float, float]:
@@ -117,14 +77,57 @@ def _centre_spread(values: np.ndarray, method: str) -> tuple[float, float]:
     raise ValueError(f"Unknown reference method: {method}")
 
 
-def standardise(df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Add oriented, clipped z-score columns (z_<feature>) for every cycle.
+def reference_stats(df: pd.DataFrame, tc: TypeConfig) -> pd.DataFrame:
+    """Pooled centre and spread of gel age and each KPI in the early-life window of ONE type."""
+    ref = df[(df["chromatography_type"] == tc.name) & (df["resin_age"] <= tc.first_n_cycles)]
+    rows = []
+    for name in ["resin_age", *KPIS]:
+        values = ref[name].dropna().to_numpy(dtype=float)
+        if len(values) < 2:
+            raise ReferenceWindowError(
+                f"{tc.name}: only {len(values)} reference value(s) for {name}; "
+                f"need at least 2 cycles with resin_age <= {tc.first_n_cycles}"
+            )
+        centre, spread = _centre_spread(values, tc.method)
+        if name == "resin_age":
+            centre, spread = float(np.mean(values)), tc.resin_age_scale_cycles
+        if not np.isfinite(spread) or spread <= 0:
+            raise ReferenceWindowError(f"{tc.name}: reference spread of {name} is zero; cannot standardise")
+        rows.append({"chromatography_type": tc.name, "gel_batch": "ALL", "feature": name,
+                     "centre": centre, "spread": spread, "n": len(values), "source": "pooled"})
+    return pd.DataFrame(rows)
 
-    Returns (cycles with z columns, reference statistics table for all types).
-    """
-    out = df.copy()
-    for feature in FEATURES:
-        out[z_col(feature)] = np.nan
+
+def batch_reference_stats(df: pd.DataFrame, tc: TypeConfig, pooled: pd.DataFrame) -> pd.DataFrame:
+    """Per-batch centres (scope per_batch). Spread from the pooled table; centre falls back to pooled
+    when a batch has fewer than MIN_BATCH_REF_CYCLES early-life values for a KPI."""
+    pooled = pooled.set_index("feature")
+    rows = []
+    for batch, g in df[df["chromatography_type"] == tc.name].groupby("gel_batch", sort=True):
+        ref = g[g["resin_age"] <= tc.first_n_cycles]
+        for name in ["resin_age", *KPIS]:
+            values = ref[name].dropna().to_numpy(dtype=float)
+            if name != "resin_age" and len(values) >= MIN_BATCH_REF_CYCLES:
+                centre, source = _centre_spread(values, tc.method)[0], "batch"
+            elif name == "resin_age":
+                centre, source = pooled.loc[name, "centre"], "pooled"
+            else:
+                centre, source = pooled.loc[name, "centre"], "pooled_fallback"
+            rows.append({"chromatography_type": tc.name, "gel_batch": batch, "feature": name,
+                         "centre": centre, "spread": pooled.loc[name, "spread"], "n": len(values),
+                         "source": source})
+    stats = pd.DataFrame(rows)
+    for batch, f in stats[stats["source"] == "pooled_fallback"].groupby("gel_batch")["feature"]:
+        log.warning("%s: batch %s has < %d early-life values for %s; pooled centre used",
+                    tc.name, batch, MIN_BATCH_REF_CYCLES, ", ".join(f))
+    return stats
+
+
+def standardise(df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Add rolling means and the three z columns. Returns (cycles, reference statistics table)."""
+    out = add_rolling_means(df, cfg.rolling_window)
+    for name in ["resin_age", *[rm_col(k) for k in KPIS]]:
+        out[z_col(name)] = np.nan
 
     all_stats = []
     for type_name, tc in cfg.types.items():
@@ -136,24 +139,23 @@ def standardise(df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFrame, pd.DataFra
         if tc.scope == "per_batch":
             stats = batch_reference_stats(out, tc, stats)
         all_stats.append(stats)
-        for feature in FEATURES:
-            st = stats[stats["feature"] == feature]
+
+        for name in ["resin_age", *KPIS]:
+            st = stats[stats["feature"] == name]
             if tc.scope == "per_batch":
                 lookup = st.set_index("gel_batch")
                 centre = out.loc[mask, "gel_batch"].map(lookup["centre"])
                 spread = out.loc[mask, "gel_batch"].map(lookup["spread"])
             else:
                 centre, spread = st["centre"].iloc[0], st["spread"].iloc[0]
-            z = tc.features[feature].sign * (out.loc[mask, feature] - centre) / spread
-            out.loc[mask, z_col(feature)] = z.clip(-cfg.z_clip, cfg.z_clip)
-        log.info(
-            "%s: reference = first %d cycles per batch (%s, %s)",
-            type_name, tc.first_n_cycles, tc.method, tc.scope,
-        )
-
-    n_clipped = int((out[[z_col(f) for f in FEATURES]].abs() >= cfg.z_clip).sum().sum())
-    if n_clipped:
-        log.info("%d z-score value(s) capped at +/-%.1f", n_clipped, cfg.z_clip)
+            if name == "resin_age":
+                source_col, sign = "resin_age", +1
+            else:
+                source_col, sign = rm_col(name), tc.sign(name)
+            z = sign * (out.loc[mask, source_col] - centre) / spread
+            out.loc[mask, z_col(source_col)] = z.clip(-cfg.z_clip, cfg.z_clip)
+        log.info("%s: reference = first %d cycles per batch (%s, %s); rolling window %d cycles",
+                 type_name, tc.first_n_cycles, tc.method, tc.scope, cfg.rolling_window)
 
     stats_table = pd.concat(all_stats, ignore_index=True) if all_stats else pd.DataFrame()
     return out, stats_table

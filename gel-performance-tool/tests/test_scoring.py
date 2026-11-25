@@ -1,133 +1,84 @@
-"""Known-answer checks for the score, weight re-normalisation, smoothing and thresholds (Step 3)."""
+"""Known-answer checks for the tree predictor, the GO / NO-GO rule and the reasons."""
+
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from gel_performance.config import FEATURES, Config, FeatureSpec, TypeConfig
-from gel_performance.scoring import NO_SCORE, OK, REPLACE, WATCH, score_cycles, score_type, smooth_and_recommend
+from gel_performance.config import MODEL_FEATURES, load_config
+from gel_performance.model import predict, rules_text
+from gel_performance.report import build_batch_summary, build_cycle_table
+from gel_performance.scoring import GO, NO_GO, NO_SCORE, score_cycles
 
-# Simple weights that are easy to do by hand: 0.4, 0.2, 0.2, 0.1, 0.1
-WEIGHTS = dict(zip(FEATURES, [0.4, 0.2, 0.2, 0.1, 0.1]))
+CFG = load_config(Path(__file__).parents[1] / "config" / "config.yaml")
+
+# Hand-made tree:  pressure z <= 2 -> score 0.1 ; else age z <= 1 -> 0.4 ; else 0.9
+TREE = {"model_version": "test-tree", "features": MODEL_FEATURES, "nodes": [
+    {"id": 0, "feature": "z_rm_pt_80_percentile", "threshold": 2.0, "left": 1, "right": 2, "n": 100},
+    {"id": 1, "leaf": True, "score": 0.1, "n": 60, "n_replace": 6},
+    {"id": 2, "feature": "z_resin_age", "threshold": 1.0, "left": 3, "right": 4, "n": 40},
+    {"id": 3, "leaf": True, "score": 0.4, "n": 20, "n_replace": 8},
+    {"id": 4, "leaf": True, "score": 0.9, "n": 20, "n_replace": 18},
+]}
 
 
-def make_type(name="type_A", ok_min=70.0, watch_min=40.0, composite_at_zero=4.0):
-    feats = {f: FeatureSpec(f, "higher_is_worse", w, 100.0 if f == "resin_age" else None)
-             for f, w in WEIGHTS.items()}
-    return TypeConfig(name, 30, "mean_std", feats, composite_at_zero, ok_min, watch_min)
-
-
-def make_cfg(smoothing_window=1):
-    return Config("test", 6.0, 3, smoothing_window, {"type_A": make_type()})
-
-
-def z_rows(*rows, batch="GB-X01"):
-    """Build a frame of z-scores. Each row is a list of 5 z-values (NaN = missing)."""
-    df = pd.DataFrame(rows, columns=[f"z_{f}" for f in FEATURES])
-    df["gel_batch"] = batch
-    df["chromatography_type"] = "type_A"
+def frame(rows):
+    """rows: (z_age, z_flow, z_pressure, rolling pressure bar, incomplete)"""
+    df = pd.DataFrame(rows, columns=[*MODEL_FEATURES, "rm_pt_80_percentile", "incomplete"])
+    df["gel_batch"], df["chromatography_type"] = "GB-X01", "type_A"   # type_A limit = 1.36 bar
     df["resin_age"] = range(1, len(df) + 1)
+    df["cycle_end_time"] = "2024-01-01T00:00:00"
+    df["rm_elution_flow_median"], df["elution_flow_median"], df["pt_80_percentile"] = 100.0, 100.0, 1.3
+    df["missing_features"] = np.where(df["incomplete"], "elution_flow_median", "")
     return df
 
 
-def test_fresh_resin_scores_100():
-    out = score_type(z_rows([0, 0, 0, 0, 0]), make_type(), 3)
-    assert out.loc[0, "score"] == pytest.approx(100.0)
-    assert out.loc[0, "flag"] == "complete"
+def test_predictor_follows_the_tree():
+    X = pd.DataFrame([[0, 0, 1.5], [0.5, 0, 3.0], [2.0, 0, 3.0], [2.0, 0, np.nan]], columns=MODEL_FEATURES)
+    out = predict(TREE, X)
+    assert out["score"].tolist()[:3] == [0.1, 0.4, 0.9]
+    assert np.isnan(out["score"].iloc[3])                 # missing feature -> no score, never guessed
+    assert "elution pressure (rolling) z 3.00 > 2.00" in out["rule_path"].iloc[2]
 
 
-def test_score_known_answer_and_contributions():
-    # z = 1 for every feature -> composite = 1 -> score = 100 * (1 - 1/4) = 75
-    # each feature loses 100 * w * 1 / 4 points: 10, 5, 5, 2.5, 2.5
-    out = score_type(z_rows([1, 1, 1, 1, 1]), make_type(), 3)
-    assert out.loc[0, "composite"] == pytest.approx(1.0)
-    assert out.loc[0, "score"] == pytest.approx(75.0)
-    assert out.loc[0, "pts_pt_80_percentile"] == pytest.approx(10.0)
-    assert out.loc[0, "pts_resin_age"] == pytest.approx(2.5)
-    pts = out[[f"pts_{f}" for f in FEATURES]].sum(axis=1)
-    assert 100 - pts.loc[0] == pytest.approx(out.loc[0, "score"])  # contributions add up to the score
+def test_threshold_boundary_goes_left():
+    X = pd.DataFrame([[0, 0, 2.0]], columns=MODEL_FEATURES)
+    assert predict(TREE, X)["score"].iloc[0] == 0.1       # value == threshold -> left branch
 
 
-def test_score_is_capped_between_0_and_100():
-    out = score_type(z_rows([6, 6, 6, 6, 6], [-3, -3, -3, -3, -3]), make_type(), 3)
-    assert out.loc[0, "score"] == 0.0     # composite 6 > 4
-    assert out.loc[1, "score"] == 100.0   # better than reference is capped at 100
-
-
-def test_weights_are_renormalised_when_a_feature_is_missing():
-    # pt_80 (weight 0.4) missing -> remaining weights 0.2, 0.2, 0.1, 0.1 sum to 0.6
-    # re-normalised: 1/3, 1/3, 1/6, 1/6
-    out = score_type(z_rows([np.nan, 2, 2, 2, 2]), make_type(), 3)
-    row = out.loc[0]
-    assert row["flag"] == "incomplete"
-    assert row["w_pt_80_percentile"] == 0                        # missing feature gets weight 0
-    assert row["w_max_pressure_displacement"] == pytest.approx(1 / 3)
-    assert row["w_resin_age"] == pytest.approx(1 / 6)
-    assert np.isnan(row["pts_pt_80_percentile"])                 # no contribution invented
-    assert row["composite"] == pytest.approx(2.0)                # all available z = 2
-    assert row["score"] == pytest.approx(100 * (1 - 2 / 4))      # 50, not dragged towards 100 or 0
-
-
-def test_too_few_features_gives_no_score():
-    out = score_type(z_rows([np.nan, np.nan, np.nan, 1, 1]), make_type(), 3)
-    assert out.loc[0, "flag"] == "insufficient"
-    assert np.isnan(out.loc[0, "score"])
-
-
-@pytest.mark.parametrize("score, expected", [
-    (100.0, OK), (70.0, OK), (69.99, WATCH), (40.0, WATCH), (39.99, REPLACE), (0.0, REPLACE),
+@pytest.mark.parametrize("z_age, z_p, rm_p, expected", [
+    (2.0, 3.0, 1.40, NO_GO),   # score 0.9 high AND pressure 1.40 >= 1.36 -> replace
+    (2.0, 3.0, 1.30, GO),      # score high but pressure below limit -> keep
+    (0.0, 1.0, 1.40, GO),      # pressure at limit but score 0.1 low -> keep
+    (0.0, 1.0, 1.36, GO),
+    (2.0, 3.0, 1.36, NO_GO),   # exactly at the limit counts as at the limit
 ])
-def test_thresholds(score, expected):
-    df = pd.DataFrame({"gel_batch": ["B"], "chromatography_type": ["type_A"], "resin_age": [1], "score": [score]})
-    out = smooth_and_recommend(df, make_cfg(smoothing_window=1))
-    assert out.loc[0, "recommendation"] == expected
+def test_go_no_go_rule(z_age, z_p, rm_p, expected):
+    out = score_cycles(frame([(z_age, 0.0, z_p, rm_p, False)]), CFG, TREE)
+    assert out["decision"].iloc[0] == expected
 
 
-def test_missing_score_gives_no_score_recommendation():
-    df = pd.DataFrame({"gel_batch": ["B"], "chromatography_type": ["type_A"], "resin_age": [1], "score": [np.nan]})
-    out = smooth_and_recommend(df, make_cfg())
-    assert out.loc[0, "recommendation"] == NO_SCORE
+def test_no_score_and_flags():
+    out = score_cycles(frame([(np.nan, 0.0, 1.0, 1.2, True), (0.0, 0.0, 1.0, 1.2, True),
+                              (0.0, 0.0, 1.0, 1.2, False)]), CFG, TREE)
+    assert out["decision"].tolist() == [NO_SCORE, GO, GO]
+    assert out["flag"].tolist() == ["insufficient", "incomplete", "complete"]
 
 
-def test_smoothing_ignores_a_single_bad_cycle():
-    scores = [80, 80, 10, 80, 80]  # one noisy cycle in the middle
-    df = pd.DataFrame({"gel_batch": "B", "chromatography_type": "type_A",
-                       "resin_age": range(1, 6), "score": scores})
-    out = smooth_and_recommend(df, make_cfg(smoothing_window=5))
-    assert (out["recommendation"] == OK).all()
-    assert out.loc[2, "smoothed_score"] == pytest.approx(80.0)  # median of 80, 80, 10
+def test_reason_and_batch_summary():
+    scored = score_cycles(frame([(0.0, 0.0, 1.0, 1.20, False), (2.0, 0.0, 3.0, 1.40, True)]), CFG, TREE)
+    table = build_cycle_table(scored, CFG)
+    nogo = table.iloc[1]
+    assert nogo["decision"] == NO_GO
+    assert "rolling elution pressure 1.40 bar >= limit 1.36 bar" in nogo["reason"]
+    assert "replacement score 0.90 >= 0.50" in nogo["reason"]
+    assert "missing elution_flow_median" in nogo["reason"]
+    summary = build_batch_summary(table)
+    assert summary.loc[0, "decision"] == NO_GO and summary.loc[0, "first_no_go_age"] == 2
 
 
-def test_smoothing_stays_within_a_gel_batch():
-    a = pd.DataFrame({"gel_batch": "A", "chromatography_type": "type_A", "resin_age": [1, 2], "score": [10, 10]})
-    b = pd.DataFrame({"gel_batch": "B", "chromatography_type": "type_A", "resin_age": [1, 2], "score": [90, 90]})
-    out = smooth_and_recommend(pd.concat([a, b], ignore_index=True), make_cfg(smoothing_window=5))
-    assert out.loc[out["gel_batch"] == "B", "smoothed_score"].tolist() == [90, 90]
-
-
-def test_score_cycles_end_to_end_on_z_frame():
-    out = score_cycles(z_rows([0, 0, 0, 0, 0], [1, 1, 1, 1, 1], [np.nan, 2, 2, 2, 2]), make_cfg())
-    assert out["flag"].tolist() == ["complete", "complete", "incomplete"]
-    assert out["score"].tolist() == pytest.approx([100.0, 75.0, 50.0])
-
-
-# ---- report table -------------------------------------------------------------------
-
-def test_reason_names_the_main_driver_and_missing_feature():
-    from gel_performance.report import build_cycle_table
-
-    df = z_rows([np.nan, 2, 6, 0, 0])
-    df["cycle_end_time"] = "2024-01-01T00:00:00"
-    df["n_features_available"] = 4
-    df["missing_features"] = "pt_80_percentile"
-    for f in FEATURES:
-        if f != "resin_age":
-            df[f] = 1.0
-    table = build_cycle_table(score_cycles(df, make_cfg()), make_cfg())
-    row = table.iloc[0]
-    # weights 0.2, 0.2, 0.1, 0.1 -> 1/3, 1/3, 1/6, 1/6 ; composite = 2/3 + 2 = 2.667 ; score = 33.3
-    assert row["score"] == pytest.approx(100 * (1 - (8 / 3) / 4), abs=1e-3)
-    assert row["recommendation"] == REPLACE
-    assert "elution flow (-50 pts)" in row["reason"]
-    assert "scored without: pt_80_percentile" in row["reason"]
-    assert row["config_version"] == "test"
+def test_rules_text_is_readable():
+    text = rules_text(TREE)
+    assert "if elution pressure (rolling) z <= 2.00:" in text
+    assert "-> score 0.90  (18 of 20 training cycles were 'replace')" in text

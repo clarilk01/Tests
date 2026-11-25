@@ -2,25 +2,24 @@
 
 The rest of the code never reads the YAML directly. It receives a `Config` object whose values
 have already been checked, so a typo in the config fails loudly at the start of a run instead of
-silently producing wrong scores.
+silently producing wrong decisions.
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
 
-# The five features every chromatography type must define (same order everywhere in the tool).
-FEATURES = [
-    "pt_80_percentile",
-    "max_pressure_displacement",
-    "elution_flow_median",
-    "flow_median_displacement",
-    "resin_age",
-]
+# The two process KPIs the tool uses, plus gel age.
+KPIS = ["elution_flow_median", "pt_80_percentile"]
+PRESSURE_KPI = "pt_80_percentile"
+INPUT_FEATURES = ["resin_age", *KPIS]
+
+# Columns produced by features.py and fed to the decision tree (always in this order).
+MODEL_FEATURES = ["z_resin_age", "z_rm_elution_flow_median", "z_rm_pt_80_percentile"]
+
 DIRECTIONS = {"higher_is_worse": +1, "lower_is_worse": -1}
 METHODS = {"mean_std", "robust"}
 SCOPES = {"pooled", "per_batch"}
@@ -31,36 +30,35 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True)
-class FeatureSpec:
-    name: str
-    direction: str
-    weight: float
-    scale_cycles: float | None = None  # only used for resin_age
-
-    @property
-    def sign(self) -> int:
-        """+1 if a higher raw value is worse, -1 if a lower raw value is worse."""
-        return DIRECTIONS[self.direction]
-
-
-@dataclass(frozen=True)
 class TypeConfig:
     name: str
     first_n_cycles: int
     method: str
-    features: dict[str, FeatureSpec]
-    composite_at_zero: float
-    ok_min: float
-    watch_min: float
-    scope: str = "pooled"  # pooled: one baseline per type ; per_batch: each batch's own early cycles
+    scope: str
+    directions: dict[str, str]          # KPI -> "higher_is_worse" / "lower_is_worse"
+    resin_age_scale_cycles: float
+    pressure_limit_bar: float
+
+    def sign(self, kpi: str) -> int:
+        """+1 if a higher raw value is worse, -1 if a lower raw value is worse."""
+        return DIRECTIONS[self.directions[kpi]]
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    file: str
+    max_depth: int
+    min_samples_leaf: int
+    replace_horizon: int
 
 
 @dataclass(frozen=True)
 class Config:
     config_version: str
+    rolling_window: int
     z_clip: float
-    min_features_for_score: int
-    smoothing_window: int
+    decision_threshold: float
+    model: ModelConfig
     types: dict[str, TypeConfig]
 
 
@@ -76,23 +74,29 @@ def load_config(path: str | Path) -> Config:
 def parse_config(raw: dict) -> Config:
     """Build a Config from an already-parsed YAML dict (also handy for tests)."""
     try:
-        defaults = raw["defaults"]
+        d, m = raw["defaults"], raw["model"]
         cfg = Config(
             config_version=str(raw["config_version"]),
-            z_clip=float(defaults["z_clip"]),
-            min_features_for_score=int(defaults["min_features_for_score"]),
-            smoothing_window=int(defaults["smoothing_window"]),
+            rolling_window=int(d["rolling_window"]),
+            z_clip=float(d["z_clip"]),
+            decision_threshold=float(d["decision_threshold"]),
+            model=ModelConfig(
+                file=str(m["file"]), max_depth=int(m["max_depth"]),
+                min_samples_leaf=int(m["min_samples_leaf"]), replace_horizon=int(m["replace_horizon"]),
+            ),
             types={name: _parse_type(name, t) for name, t in raw["chromatography_types"].items()},
         )
     except KeyError as exc:
         raise ConfigError(f"Missing key in config: {exc}") from exc
 
+    if cfg.rolling_window < 1:
+        raise ConfigError("defaults.rolling_window must be >= 1 (1 = no rolling mean)")
     if cfg.z_clip <= 0:
         raise ConfigError("defaults.z_clip must be > 0")
-    if not 1 <= cfg.min_features_for_score <= len(FEATURES):
-        raise ConfigError(f"defaults.min_features_for_score must be between 1 and {len(FEATURES)}")
-    if cfg.smoothing_window < 1:
-        raise ConfigError("defaults.smoothing_window must be >= 1 (1 = no smoothing)")
+    if not 0 < cfg.decision_threshold < 1:
+        raise ConfigError("defaults.decision_threshold must be between 0 and 1")
+    if cfg.model.max_depth < 1 or cfg.model.min_samples_leaf < 1 or cfg.model.replace_horizon < 0:
+        raise ConfigError("model: max_depth and min_samples_leaf must be >= 1, replace_horizon >= 0")
     if not cfg.types:
         raise ConfigError("chromatography_types is empty")
     return cfg
@@ -100,48 +104,29 @@ def parse_config(raw: dict) -> Config:
 
 def _parse_type(name: str, t: dict) -> TypeConfig:
     where = f"chromatography_types.{name}"
-
-    features = {}
-    for fname, spec in t["features"].items():
-        features[fname] = FeatureSpec(
-            name=fname,
-            direction=spec["direction"],
-            weight=float(spec["weight"]),
-            scale_cycles=float(spec["scale_cycles"]) if "scale_cycles" in spec else None,
-        )
-
+    kpis = t["kpis"]
+    if set(kpis) != set(KPIS):
+        raise ConfigError(f"{where}.kpis must define exactly {KPIS}")
     tc = TypeConfig(
         name=name,
         first_n_cycles=int(t["reference"]["first_n_cycles"]),
         method=t["reference"].get("method", "mean_std"),
-        features=features,
-        composite_at_zero=float(t["score"]["composite_at_zero"]),
-        ok_min=float(t["thresholds"]["ok_min"]),
-        watch_min=float(t["thresholds"]["watch_min"]),
         scope=t["reference"].get("scope", "pooled"),
+        directions={k: v["direction"] for k, v in kpis.items()},
+        resin_age_scale_cycles=float(t["resin_age_scale_cycles"]),
+        pressure_limit_bar=float(t["pressure_limit_bar"]),
     )
-
-    if set(features) != set(FEATURES):
-        missing, extra = set(FEATURES) - set(features), set(features) - set(FEATURES)
-        raise ConfigError(f"{where}.features: missing {sorted(missing)}, unexpected {sorted(extra)}")
-    for f in features.values():
-        if f.direction not in DIRECTIONS:
-            raise ConfigError(f"{where}.features.{f.name}.direction must be one of {list(DIRECTIONS)}")
-        if f.weight < 0:
-            raise ConfigError(f"{where}.features.{f.name}.weight must be >= 0")
-    total = sum(f.weight for f in features.values())
-    if not math.isclose(total, 1.0, abs_tol=1e-6):
-        raise ConfigError(f"{where}: feature weights must add up to 1.0 (they add up to {total:.4f})")
-    if not features["resin_age"].scale_cycles or features["resin_age"].scale_cycles <= 0:
-        raise ConfigError(f"{where}.features.resin_age.scale_cycles must be > 0")
+    for kpi, direction in tc.directions.items():
+        if direction not in DIRECTIONS:
+            raise ConfigError(f"{where}.kpis.{kpi}.direction must be one of {list(DIRECTIONS)}")
     if tc.first_n_cycles < 2:
         raise ConfigError(f"{where}.reference.first_n_cycles must be >= 2 (need a spread)")
     if tc.method not in METHODS:
         raise ConfigError(f"{where}.reference.method must be one of {sorted(METHODS)}")
     if tc.scope not in SCOPES:
         raise ConfigError(f"{where}.reference.scope must be one of {sorted(SCOPES)}")
-    if tc.composite_at_zero <= 0:
-        raise ConfigError(f"{where}.score.composite_at_zero must be > 0")
-    if not 0 <= tc.watch_min < tc.ok_min <= 100:
-        raise ConfigError(f"{where}.thresholds: need 0 <= watch_min < ok_min <= 100")
+    if tc.resin_age_scale_cycles <= 0:
+        raise ConfigError(f"{where}.resin_age_scale_cycles must be > 0")
+    if tc.pressure_limit_bar <= 0:
+        raise ConfigError(f"{where}.pressure_limit_bar must be > 0")
     return tc
