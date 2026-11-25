@@ -193,7 +193,7 @@ st.caption(
 
 k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("Optimal fermentation length", f"{opt_h:.0f} h", f"{opt_h / 24:.1f} days",
-          delta_color="off", delta_arrow="off")
+          delta_color="off")   # keep or drop other args, but remove delta_arrow=...
 if window:
     k2.metric("Harvest window (≥ 98 % of best)", f"{window[0]:.0f}–{window[1]:.0f} h")
 else:
