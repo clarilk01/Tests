@@ -1,17 +1,16 @@
-"""Known-answer checks for the validation logic (Step 6)."""
+"""Checks for training labels, the batch split and the validation metrics."""
+
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
-from gel_performance.scoring import OK, REPLACE, WATCH
-from gel_performance.validate import (
-    Thresholds, balanced_accuracy, batch_role, calibrate, classify, evaluate, true_class,
-)
+from gel_performance.config import MODEL_FEATURES, load_config
+from gel_performance.simulate import SimSettings, simulate
+from gel_performance.train import batch_role, label_replace, train
+from gel_performance.validate import evaluate
 
-
-def test_true_class_boundaries():
-    to_go = pd.Series([200, 76, 75, 26, 25, 0, -10])
-    assert true_class(to_go).tolist() == [OK, OK, WATCH, WATCH, REPLACE, REPLACE, REPLACE]
+CFG = load_config(Path(__file__).parents[1] / "config" / "config.yaml")
 
 
 def test_batch_split_is_odd_vs_even():
@@ -19,38 +18,33 @@ def test_batch_split_is_odd_vs_even():
     assert batch_role("GB-B06") == "holdout"
 
 
-def test_classify_uses_thresholds():
-    s = pd.Series([80.0, 50.0, 10.0, float("nan")])
-    assert classify(s, Thresholds(60, 30)).tolist() == [OK, WATCH, REPLACE, "NO SCORE"]
+def test_label_boundaries():
+    df = pd.DataFrame({"gel_batch": "GB-A01", "resin_age": [50, 74, 75, 100, 120]})
+    truth = pd.DataFrame({"gel_batch": ["GB-A01"], "true_replacement_age": [100]})
+    out = label_replace(df, truth, horizon=25)
+    assert out["label_replace"].tolist() == [0, 0, 1, 1, 1]   # <= 25 cycles to go, or past it
 
 
-def test_balanced_accuracy_is_not_fooled_by_the_majority_class():
-    true = pd.Series([OK] * 8 + [WATCH, REPLACE])
-    always_ok = pd.Series([OK] * 10)
-    assert (always_ok == true).mean() == 0.8                       # plain accuracy looks good...
-    assert balanced_accuracy(true, always_ok) == pytest.approx(1 / 3)  # ...balanced accuracy does not
-
-
-def toy_batch(true_age=100):
-    """Score falls linearly from 100 to 0 over 100 cycles; true replacement at cycle 100."""
-    ages = list(range(1, 101))
-    return pd.DataFrame({
-        "gel_batch": "GB-A01", "resin_age": ages, "smoothed_score": [100 - a for a in ages],
-        "true_replacement_age": true_age, "true_class": true_class(pd.Series([true_age - a for a in ages])),
+def test_evaluate_known_answer():
+    df = pd.DataFrame({
+        "gel_batch": "GB-A02", "resin_age": [1, 2, 3, 4], "true_replacement_age": 4,
+        "label_replace": [0, 0, 1, 1], "decision": ["GO", "NO-GO", "GO", "NO-GO"],
     })
-
-
-def test_calibrate_finds_the_perfect_thresholds_on_a_toy_batch():
-    # true WATCH starts at cycles_to_go 75 -> age 25 -> score 75 ; REPLACE at age 75 -> score 25
-    t = calibrate(toy_batch())
-    assert (t.ok_min, t.watch_min) == (76.0, 26.0)
-    r = evaluate(toy_batch(), t)
-    assert r["agreement"] == 1.0
-
-
-def test_evaluate_reports_warning_lead_time():
-    r = evaluate(toy_batch(), Thresholds(76, 26))
+    r = evaluate(df)
+    assert r["agreement"] == 0.5
+    assert r["replace_caught"] == 0.5 and r["no_go_correct"] == 0.5
     b = r["batches"].iloc[0]
-    assert b["first_replace_soon_age"] == 75
-    assert b["warning_cycles_before_true_point"] == 25
+    assert b["first_no_go_age"] == 2 and b["warning_cycles_before_true_point"] == 2
     assert b["outcome"] == "in time"
+
+
+def test_training_is_deterministic_and_uses_calibration_batches_only():
+    cycles, batches, _ = simulate(seed=3, s=SimSettings(batches_per_type=2, n_outliers_per_type=1))
+    from gel_performance.data import prepare_cycles
+    prepared = prepare_cycles(cycles)
+    a, b = train(prepared, batches, CFG), train(prepared, batches, CFG)
+    assert a == b
+    assert a["features"] == MODEL_FEATURES
+    assert all(batch_role(x) == "calibration" for x in a["trained_on_batches"])
+    leaves = [n for n in a["nodes"] if n.get("leaf")]
+    assert all(0.0 <= n["score"] <= 1.0 for n in leaves)

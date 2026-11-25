@@ -1,0 +1,92 @@
+{
+  "model_version": "tree-1.0.0",
+  "trained_with_config_version": "1.0.0",
+  "features": [
+    "z_resin_age",
+    "z_rm_elution_flow_median",
+    "z_rm_pt_80_percentile"
+  ],
+  "label": "replace if true replacement point <= 25 cycles away",
+  "trained_on_batches": [
+    "GB-A01",
+    "GB-A03",
+    "GB-A05",
+    "GB-B01",
+    "GB-B03",
+    "GB-B05"
+  ],
+  "n_training_cycles": 2127,
+  "n_training_replace": 504,
+  "max_depth": 3,
+  "min_samples_leaf": 20,
+  "sklearn_version": "1.9.1",
+  "nodes": [
+    {
+      "id": 0,
+      "feature": "z_rm_pt_80_percentile",
+      "threshold": 3.9435,
+      "left": 1,
+      "right": 6,
+      "n": 2127
+    },
+    {
+      "id": 1,
+      "feature": "z_rm_elution_flow_median",
+      "threshold": 2.6841,
+      "left": 2,
+      "right": 5,
+      "n": 1675
+    },
+    {
+      "id": 2,
+      "feature": "z_resin_age",
+      "threshold": 2.84,
+      "left": 3,
+      "right": 4,
+      "n": 1648
+    },
+    {
+      "id": 3,
+      "leaf": true,
+      "score": 0.0062,
+      "n": 1608,
+      "n_replace": 10
+    },
+    {
+      "id": 4,
+      "leaf": true,
+      "score": 0.5,
+      "n": 40,
+      "n_replace": 20
+    },
+    {
+      "id": 5,
+      "leaf": true,
+      "score": 1.0,
+      "n": 27,
+      "n_replace": 27
+    },
+    {
+      "id": 6,
+      "feature": "z_rm_elution_flow_median",
+      "threshold": 0.1435,
+      "left": 7,
+      "right": 8,
+      "n": 452
+    },
+    {
+      "id": 7,
+      "leaf": true,
+      "score": 0.75,
+      "n": 20,
+      "n_replace": 15
+    },
+    {
+      "id": 8,
+      "leaf": true,
+      "score": 1.0,
+      "n": 432,
+      "n_replace": 432
+    }
+  ]
+}

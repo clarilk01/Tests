@@ -1,9 +1,9 @@
-"""Command-line entry point. Safe to schedule (e.g. hourly).
+"""Command-line entry point.
 
     python -m gel_performance.run --input data/synthetic/cycles.csv --output output/ [--config config/config.yaml]
 
 Writes to the output folder:
-    cycle_scores.csv     one row per cycle: score, recommendation, contributions, reason
+    cycle_scores.csv     one row per cycle: GO / NO-GO, replacement score 0..1, rolling KPIs, tree rule, reason
     batch_summary.csv    latest status per gel batch
     reference_stats.csv  the early-life baseline (centre, spread) used for each type and feature
     run.log              appended on every run: what was read, counts, warnings and errors
@@ -12,7 +12,10 @@ Idempotent: the CSV files depend only on the input and the config (no timestamps
 same input always produces byte-identical files. Each file is written to a temporary name first and
 then renamed, so a crash never leaves a half-written file behind.
 
-Exit codes: 0 = success, 1 = config problem, 2 = input data problem, 3 = unexpected error.
+The decision tree is read from the model file named in config.yaml (path relative to the project
+folder, i.e. the parent of the config folder). Train it with: python -m gel_performance.train
+
+Exit codes: 0 = success, 1 = config or model problem, 2 = input data problem, 3 = unexpected error.
 """
 
 from __future__ import annotations
@@ -28,11 +31,12 @@ from pathlib import Path
 import pandas as pd
 
 from . import __version__
-from .config import Config, ConfigError, load_config
+from .config import MODEL_FEATURES, Config, ConfigError, load_config
 from .data import DataError, load_cycles
 from .features import ReferenceWindowError, standardise
 from .report import build_batch_summary, build_cycle_table
-from .scoring import NO_SCORE, OK, REPLACE, WATCH, score_cycles
+from .model import ModelError, load_model
+from .scoring import GO, NO_GO, NO_SCORE, score_cycles
 
 log = logging.getLogger("gel_performance")
 
@@ -40,10 +44,14 @@ DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "config.yaml"
 EXIT_OK, EXIT_CONFIG, EXIT_DATA, EXIT_UNEXPECTED = 0, 1, 2, 3
 
 
-def build_tables(cycles: pd.DataFrame, cfg: Config) -> dict[str, pd.DataFrame]:
+def model_path(config_path: Path, cfg: Config) -> Path:
+    return (Path(config_path).resolve().parent.parent / cfg.model.file).resolve()
+
+
+def build_tables(cycles: pd.DataFrame, cfg: Config, model: dict) -> dict[str, pd.DataFrame]:
     """The in-memory pipeline: prepared cycles -> output tables (no files written)."""
     standardised, ref_stats = standardise(cycles, cfg)
-    scored = score_cycles(standardised, cfg)
+    scored = score_cycles(standardised, cfg, model)
     cycle_table = build_cycle_table(scored, cfg)
     return {
         "cycle_scores.csv": cycle_table,
@@ -56,26 +64,22 @@ def run(input_path: Path, output_dir: Path, config_path: Path) -> dict[str, pd.D
     """Run the whole pipeline and write the outputs. Returns the tables (handy for tests)."""
     cfg = load_config(config_path)
     log.info("Config %s (config_version %s)", config_path, cfg.config_version)
+    model = load_model(model_path(config_path, cfg), MODEL_FEATURES)
+    log.info("Model %s (trained on %s)", model["model_version"], ", ".join(model["trained_on_batches"]))
 
     cycles = load_cycles(input_path, known_types=set(cfg.types))
     if cycles.empty:
         raise DataError("No usable cycles in the input")
-    tables = build_tables(cycles, cfg)
+    tables = build_tables(cycles, cfg, model)
     output_dir.mkdir(parents=True, exist_ok=True)
     for name, table in tables.items():
         _write_atomic(table, output_dir / name)
         log.info("Wrote %s (%d rows)", output_dir / name, len(table))
 
-    rec = tables["cycle_scores.csv"]["recommendation"].value_counts()
-    summary = tables["batch_summary.csv"]
-    log.info(
-        "Cycle recommendations: %d OK, %d WATCH, %d REPLACE SOON, %d NO SCORE",
-        rec.get(OK, 0), rec.get(WATCH, 0), rec.get(REPLACE, 0), rec.get(NO_SCORE, 0),
-    )
-    for _, b in summary.iterrows():
-        log.info("Batch %s (%s): latest cycle %d -> %s (smoothed score %.1f)",
-                 b["gel_batch"], b["chromatography_type"], b["latest_resin_age"],
-                 b["recommendation"], b["smoothed_score"])
+    for _, b in tables["batch_summary.csv"].iterrows():
+        log.info("Batch %s (%s): latest cycle %d -> %s (score %.2f, rolling pressure %.2f / limit %.2f bar)",
+                 b["gel_batch"], b["chromatography_type"], b["latest_resin_age"], b["decision"],
+                 b["score"], b["rm_pt_80_percentile"], b["pressure_limit_bar"])
     return tables
 
 
@@ -121,13 +125,13 @@ def main(argv: list[str] | None = None) -> int:
         run(args.input, args.output, args.config)
         log.info("=== Run finished OK in %.1f s ===", time.perf_counter() - started)
         return EXIT_OK
-    except ConfigError as exc:
-        log.error("Config problem: %s", exc)
+    except (ConfigError, ModelError) as exc:
+        log.error("Config or model problem: %s", exc)
         return EXIT_CONFIG
     except (DataError, ReferenceWindowError) as exc:
         log.error("Input data problem: %s", exc)
         return EXIT_DATA
-    except Exception:  # noqa: BLE001 - a scheduled job must log every failure, not crash silently
+    except Exception:  # noqa: BLE001 - log every failure, never crash silently
         log.exception("Unexpected error")
         return EXIT_UNEXPECTED
     finally:

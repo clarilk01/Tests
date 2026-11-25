@@ -28,7 +28,7 @@ def test_missing_value_is_flagged_and_not_filled():
     second = out.iloc[1]
     assert bool(second["incomplete"]) is True
     assert second["missing_features"] == "elution_flow_median"
-    assert second["n_features_available"] == 4
+    assert second["n_features_available"] == 2   # resin_age + pt_80 (of 3 inputs)
     assert np.isnan(second["elution_flow_median"])  # still missing, not filled
     assert bool(out.iloc[0]["incomplete"]) is False
 

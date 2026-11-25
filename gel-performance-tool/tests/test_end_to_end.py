@@ -33,17 +33,16 @@ def test_full_run_produces_all_outputs(small_input, tmp_path):
     scores = pd.read_csv(tmp_path / "cycle_scores.csv")
     n_in = len(pd.read_csv(small_input))
     assert len(scores) == n_in                                   # no cycle lost
-    assert scores["score"].dropna().between(0, 100).all()
-    assert set(scores["recommendation"]) <= {"OK", "WATCH", "REPLACE SOON", "NO SCORE"}
+    assert scores["score"].dropna().between(0, 1).all()          # replacement score is 0..1
+    assert set(scores["decision"]) <= {"GO", "NO-GO", "NO SCORE"}
     assert (scores["flag"] == "incomplete").any()                # missing data was flagged
-    # every scored cycle: points lost add up to 100 - score (unless the 0/100 cap applied)
-    pts = scores.filter(like="pts_").sum(axis=1)
-    uncapped = scores["score"].between(0.01, 99.99)
-    assert ((100 - pts[uncapped]) - scores.loc[uncapped, "score"]).abs().max() < 1e-3
-    # fresh resin is healthy, worn resin is not
-    by_batch = scores.sort_values("resin_age").groupby("gel_batch")["recommendation"]
-    assert (by_batch.first() == "OK").all()
-    assert (by_batch.last() == "REPLACE SOON").all()
+    # NO-GO only when BOTH conditions hold
+    nogo = scores[scores["decision"] == "NO-GO"]
+    assert (nogo["score"] >= 0.5).all() and nogo["at_pressure_limit"].all()
+    # fresh resin is GO, worn-out resin is NO-GO
+    by_batch = scores.sort_values("resin_age").groupby("gel_batch")["decision"]
+    assert (by_batch.first() == "GO").all()
+    assert (by_batch.last() == "NO-GO").all()
 
 
 def test_running_twice_gives_identical_files(small_input, tmp_path):
@@ -73,9 +72,17 @@ def test_log_records_what_happened(small_input, tmp_path):
 
 def test_bad_config_fails_with_config_exit_code(small_input, tmp_path):
     bad = tmp_path / "bad.yaml"
-    bad.write_text(CONFIG.read_text().replace("weight: 0.30", "weight: 0.90", 1))
+    bad.write_text(CONFIG.read_text().replace("decision_threshold: 0.5", "decision_threshold: 5"))
     assert run_cli(small_input, tmp_path / "out", config=bad) == EXIT_CONFIG
-    assert "weights must add up to 1.0" in (tmp_path / "out" / "run.log").read_text()
+    assert "decision_threshold" in (tmp_path / "out" / "run.log").read_text()
+
+
+def test_missing_model_file_fails_with_config_exit_code(small_input, tmp_path):
+    (tmp_path / "config").mkdir()
+    cfg = tmp_path / "config" / "config.yaml"           # model path is resolved next to this config
+    cfg.write_text(CONFIG.read_text())
+    assert run_cli(small_input, tmp_path / "out", config=cfg) == EXIT_CONFIG
+    assert "Model file not found" in (tmp_path / "out" / "run.log").read_text()
 
 
 def test_missing_column_fails_with_data_exit_code(small_input, tmp_path):

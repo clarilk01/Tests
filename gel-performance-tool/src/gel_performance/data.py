@@ -16,12 +16,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from .config import FEATURES
+from .config import INPUT_FEATURES as FEATURES
 
 log = logging.getLogger(__name__)
 
 ID_COLUMNS = ["gel_batch", "chromatography_type", "cycle_end_time"]
-REQUIRED_COLUMNS = ID_COLUMNS + FEATURES
+REQUIRED_COLUMNS = ID_COLUMNS + FEATURES  # other columns in the file are ignored
 SORT_KEYS = ["chromatography_type", "gel_batch", "resin_age", "cycle_end_time"]
 
 
