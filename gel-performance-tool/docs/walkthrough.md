@@ -7,107 +7,95 @@ it usually raises. All data is synthetic.
 
 ## 0:00 – The problem (30 s)
 
-Chromatography resin ("gel") is reused for hundreds of cycles and slowly wears out: back-pressure rises, flow drops.
-Replacing it too early wastes expensive resin; too late risks a failed or out-of-spec run. Operators usually judge
-from several signals at once. **This tool turns those signals into one 0–100 health score per cycle, plus an
-OK / WATCH / REPLACE SOON recommendation that explains itself.**
+Chromatography resin ("gel") is reused for hundreds of cycles and slowly wears out: elution pressure rises and
+elution flow drops. Replacing it too early wastes expensive resin; too late risks a failed run. **This tool gives
+every cycle a replacement score from 0 to 1 and a GO / NO-GO light: green = keep using, red = replace.**
 
 ## 0:30 – The data (30 s)
 
-One row per completed cycle: gel batch, chromatography type, resin age, two pressure features, two flow features.
-I wrote a simulator with realistic problems on purpose: batch-to-batch differences, noise, 3% interrupted runs with
-missing values, sensor spikes, and two column types with very different baselines. The simulator also stores a
-hidden "true" replacement point that the tool never sees. I only use it for validation.
+One row per completed cycle: gel batch, chromatography type, gel age, elution flow and elution pressure
+(PT 80th percentile). I wrote a simulator with realistic problems on purpose: batch-to-batch differences, noise,
+interrupted runs with missing values, sensor spikes, and two column types with very different baselines. It also
+stores a hidden "true" replacement point, which I use only for training labels and validation.
 
-> *Why synthetic?* It lets me show the whole method end-to-end without any confidential data, and it gives me a
-> ground truth to test against, which real data often does not have.
+> *Why synthetic?* I can show the whole method without any confidential data, and I have a ground truth to test
+> against, which real data often does not.
 
-## 1:00 – Step 1: put every feature on the same scale (1 min)
+## 1:00 – Features (1 min)
 
-- Each feature becomes a **z-score against early-life resin**: the first 30 cycles of each batch are "what fresh
-  looks like".
-- **Per chromatography type**, because type_B runs at about twice the pressure of type_A. Standardising them
-  together would make every type_B cycle look worn.
-- **Oriented so higher = worse:** pressures as they are, flows flipped. After this, z = +2 means "two spreads worse
-  than fresh" for every feature.
-- **Resin age is special:** its early-life spread is tiny, so a normal z-score would explode. I use "every 100
-  cycles = +1".
-- **Guard rails:** z is capped at ±6 so one spike cannot dominate; missing stays missing.
+- **Rolling mean** of each KPI over the last 10 cycles of the same gel batch, so one noisy run does not flip the decision.
+- **z-scores against early-life resin** (first 30 cycles of each batch), **per chromatography type**: type_B runs at
+  about twice the pressure of type_A, so a shared scale would make every type_B cycle look worn.
+- **Oriented so higher = worse:** pressure as it is, flow flipped.
+- **Gel age** scaled as "every 100 cycles = +1". **Gel batch** groups the rolling means but is *not* a model input,
+  because a tree would memorise batch names.
+- Missing values are never filled in; an affected cycle is flagged.
 
-## 2:00 – Step 2: one score that explains itself (1 min)
+## 2:00 – Score and decision (1 min)
 
-```
-points lost per feature = 100 × weight × z / 4
-score = 100 − total points lost   (capped to 0–100)
-```
+- A **decision tree** of depth 3 turns the three z-scores into a score from 0 to 1: the share of similar training
+  cycles that were "replace" cases. I can print the whole tree as a few if/else lines, so every score is explainable,
+  and the output names the exact rule each cycle followed.
+- **NO-GO only if both are true:** the rolling elution pressure is at or above the type's pressure limit, **and** the
+  score is 0.5 or more. Two independent signals have to agree before anyone replaces a column.
+- Trained once with scikit-learn, saved as **readable JSON**; daily scoring needs no ML library.
+- Everything tunable is in `config.yaml`, and the config and model versions are written into every output row.
 
-- Fresh resin = 100. Each feature takes off points, so the **contribution chart is just the points lost**. That is
-  what makes the recommendation explainable: "REPLACE SOON, mainly because of displacement pressure (−19 pts)".
-- **Missing feature:** its weight goes to 0, the others are scaled back up to 1, and the cycle is flagged
-  *incomplete*. Too few features → no score, flagged *insufficient*. Never filled in.
-- **Smoothing:** the recommendation uses the median of the last 5 scores, so one noisy cycle cannot flip it.
-- **Everything tunable is in `config.yaml`**, per type, with a version number written into every output row.
+## 3:00 – Built like a production job (45 s)
 
-## 3:00 – Step 3: built like a production job (45 s)
+- One daily job: a simulated plant feed releases new data, then the tool scores it. It's scheduled with the Mac's
+  built-in launchd and every run is logged.
+- **Idempotent** (same input → byte-identical output; tested), atomic writes, clear exit codes.
+- 48 pytest tests, mostly tiny hand-checkable examples, plus end-to-end tests.
+- The Streamlit dashboard **only reads** the job's output: score and GO / NO-GO on the side, flow, pressure and score
+  against time, and hovering shows the score at any moment.
 
-- One command, schedulable hourly; logs what was read, how many cycles were incomplete, and any errors.
-- **Idempotent:** same input → byte-identical output (tested, even with shuffled rows). Atomic writes, so a crash
-  never leaves a half-written file. Exit codes tell the scheduler what failed.
-- 57 pytest tests, mostly tiny known-answer examples I can check by hand, plus an end-to-end run.
-- The Streamlit dashboard **only reads** the job's output, so it can never disagree with it.
+## 3:45 – Does it work? (1 min)
 
-## 3:45 – Step 4: does it work? (1 min)
-
-- **No peeking:** thresholds were chosen on the odd-numbered batches only; results are reported on the even-numbered
-  batches.
-- **Measured with balanced accuracy**, because most cycles are "OK" and plain accuracy would reward always saying OK.
-- **Results (pooled baseline):** 72–83% cycle agreement; 5 of 6 held-out batches warned in time; it never confused
-  OK with REPLACE SOON.
-- **Things I found and kept visible:**
-  - Calibrating on only 3 batches made type_A slightly *worse* on held-out data. That is overfitting, so I report it.
-  - Two batches that *started* at high pressure were flagged early with the pooled baseline. I added a switchable
-    per-batch baseline: about 90% balanced accuracy, all 6 in time. But the simulator's truth is itself defined per
-    batch, so that comparison is partly built in. Which baseline is right is a process question, not a data
-    science one.
+- **No peeking:** the tree was trained on the odd-numbered batches; results come from the even-numbered ones it never saw.
+- **Held-out:** 92–95% of cycles agree with the truth; balanced accuracy about 91%.
+- **What I found and kept visible:**
+  - **One sensor spike can cause a false NO-GO:** it lifts the 10-cycle rolling mean over the limit for exactly 10
+    cycles. That happened in 2 of the 6 held-out batches. A rolling median would fix it, and that is my next change.
+  - A lot that **starts** at low pressure reaches a fixed limit late (one batch 3 cycles late). Fixed limits treat
+    every lot the same, which is a process decision, not a data decision.
+  - On the training batches it scores 97–99%; only the held-out numbers count.
 
 ## 4:45 – Close (15 s)
 
-"With real data I would start with why data goes missing, agree the KPI definitions per column type with process
-experts, use real past replacement decisions as the truth, and keep the config and the baseline under version
-control."
+"With real data I would use the real replacement history, with the reason for each replacement, as the truth;
+agree the KPI definitions and pressure limits per column type with process experts; and keep the config, model and
+baseline under version control."
 
 ---
 
 ## Questions you may be asked
 
-**Why not a machine-learning model?**
-There are few replacement events (one per batch), so a supervised model has little to learn from. Operators also
-need to see *why*. A transparent weighted score with calibrated thresholds is easier to validate, explain and
-change-control. ML would make sense once there are many labelled replacements.
+**Why a decision tree and not a bigger model?**
+There are few replacement events (one per batch), so a complex model would overfit. Operators also need to see
+*why*. A depth-3 tree is a handful of readable rules, and each output row shows the rule that fired.
 
-**How did you choose the weights?**
-By hand: pressures highest, then flows, then age. Only the thresholds are calibrated. With real data I would check
-the weights with experts and test their sensitivity, e.g. how often the recommendation changes if a weight moves by
-±0.05.
+**Why both a pressure limit and a score?**
+The limit is a simple, physical rule operators already trust. The score adds context (flow, age). Requiring both
+reduces false alarms; the reason text also flags the in-between cases ("score high but pressure below limit –
+keep watching").
 
-**What if a new chromatography type is added?**
-Add a section to `config.yaml`. The loader refuses to start if a feature, weight or threshold is missing. The tool
-needs at least 2 early-life cycles per feature to build a baseline, and the thresholds should be calibrated
-before anyone relies on them.
+**Why is the score in steps rather than smooth?**
+A tree has a few final rules (leaves) and each has one score. A smooth score would need a different model (e.g.
+logistic regression) and would be harder to explain.
+
+**How do you stop the tree from cheating?**
+It is trained only on calibration batches, the label comes from the simulator's truth, and results are reported on
+held-out batches. I also show the training-batch results, to make the gap visible.
 
 **What happens when a run is interrupted?**
-Missing features stay missing. The cycle is scored from what remains with re-normalised weights and flagged
-*incomplete*, or not scored at all below 3 features. The log counts them every run.
-
-**Why the median for smoothing, not the mean?**
-A median ignores one extreme cycle completely; a mean would be pulled by it. The cost is a lag of 2–3 cycles.
+The missing value stays missing. The rolling mean averages the other cycles in the window and the cycle is flagged
+*incomplete*. If the whole window is missing, there is no score.
 
 **How do you know the code is right?**
-Known-answer tests: tiny examples worked out by hand (e.g. pressures 1, 2, 3 → mean 2, std 1, so 5 → z = +3), one
-test per rule (each feature's direction, weight re-normalisation, every threshold boundary), and an end-to-end test
-that also proves idempotency.
+Known-answer tests with hand-worked examples (e.g. pressures 1, 2, 3 → mean 2, std 1, so 5 → z = +3), a hand-made tree
+to test the predictor and every GO / NO-GO case, and end-to-end tests that prove the job is idempotent.
 
 **What is the biggest weakness?**
-The ground truth. Here I invented it; in reality it is "when did we replace the resin, and why". Without it you can
-only show the score is consistent, not that it is correct. Also, these features only see hydraulics. Resin can fail
-on yield or purity first.
+The ground truth. Here I invented it; in reality it is "when did we replace the resin, and why". And the hydraulic
+KPIs cannot see quality-driven failures such as yield or purity loss.
