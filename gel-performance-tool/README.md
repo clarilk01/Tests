@@ -19,7 +19,7 @@ cd gel-performance-tool
 python -m venv .venv
 source .venv/bin/activate                      # Windows: .venv\Scripts\Activate.ps1
 pip install -e ".[dashboard,train,dev]"
-pytest                                         # 48 tests
+pytest                                         # 46 tests
 python -m gel_performance.run --input data/synthetic/cycles.csv --output output --config config/config.yaml
 python -m streamlit run dashboard/app.py
 ```
@@ -31,8 +31,6 @@ python -m gel_performance.simulate --out data/synthetic --seed 42   # regenerate
 python -m gel_performance.train                                     # re-train the decision tree
 python -m gel_performance.validate --out docs/validation_report.md  # compare decisions with the truth
 python -m gel_performance.validate --compare-scopes --out docs/scope_comparison.md
-bash scheduling/run_daily.sh                                        # the daily job, run by hand
-bash scheduling/install_mac_schedule.sh                             # schedule it every morning (macOS)
 ```
 
 ## Project structure
@@ -53,9 +51,7 @@ src/gel_performance/
     report.py                output table with plain-English reasons, batch summary
     run.py                   command-line entry point, logging, atomic writes
     validate.py              compare decisions with the simulator's truth on held-out batches
-    feed.py                  simulated daily data feed
 dashboard/app.py             Streamlit dashboard (reads the run outputs only)
-scheduling/                  daily job and macOS (launchd) install / uninstall scripts
 tests/                       pytest: known-answer, end-to-end and idempotency tests
 ```
 
@@ -144,19 +140,16 @@ KPIs, pressure limit, z-scores, the exact tree rule followed, and the config and
 > NO-GO (replace): rolling elution pressure 1.48 bar >= limit 1.36 bar and replacement score 1.00 >= 0.50.
 > Tree rule: elution pressure (rolling) z 4.44 > 3.94 AND elution flow (rolling) z 2.41 > 0.14.
 
-## 4. Running it every day
+## 4. Running it
 
-`scheduling/run_daily.sh` runs two steps:
-1. **`feed.py`** releases the synthetic data day by day into `data/live/cycles.csv`, like a plant historian would.
-   Day 1 holds 150 days of history and every real day adds 7 more days of plant data. The content depends only
-   on today's date, so running twice on the same day changes nothing.
-2. **`run.py`** scores `data/live/cycles.csv` into `output/`, which the dashboard reads.
+```bash
+python -m gel_performance.run --input data/synthetic/cycles.csv --output output --config config/config.yaml
+```
 
-On a Mac, `bash scheduling/install_mac_schedule.sh` registers the job with **launchd** (built into macOS) to run every
-day at 07:10, or when the Mac wakes up if it was asleep. Remove it with `bash scheduling/uninstall_mac_schedule.sh`.
-Logs: `output/run.log` and `output/launchd.log`. Restart the feed with `python -m gel_performance.feed --reset`.
+writes `cycle_scores.csv`, `batch_summary.csv` and `reference_stats.csv` to `output/` (read by the dashboard) and
+appends to `output/run.log`.
 
-**Built to be scheduled:** idempotent outputs (no timestamps inside, fixed sort order; tested), atomic writes (a crash
+**Built like a production job:** idempotent outputs (no timestamps inside, fixed sort order; tested), atomic writes (a crash
 never leaves half a file), every run logged (input fingerprint, rows read, incomplete cycles, decisions per batch,
 errors), and exit codes `0` OK, `1` config or model problem, `2` input data problem, `3` unexpected error.
 

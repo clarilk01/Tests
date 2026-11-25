@@ -1,6 +1,6 @@
 """Streamlit dashboard for the GO / NO-GO gel replacement tool (synthetic data).
 
-The dashboard only READS the files written by the scheduled run; it never recomputes anything,
+The dashboard only READS the files written by the scoring run; it never recomputes anything,
 so what you see is exactly what the job produced.
 
     python -m gel_performance.run --input data/synthetic/cycles.csv --output output --config config/config.yaml

@@ -43,10 +43,9 @@ stores a hidden "true" replacement point, which I use only for training labels a
 
 ## 3:00 – Built like a production job (45 s)
 
-- One daily job: a simulated plant feed releases new data, then the tool scores it. It's scheduled with the Mac's
-  built-in launchd and every run is logged.
+- One command scores a whole input file and logs every run (what was read, incomplete cycles, decisions, errors).
 - **Idempotent** (same input → byte-identical output; tested), atomic writes, clear exit codes.
-- 48 pytest tests, mostly tiny hand-checkable examples, plus end-to-end tests.
+- 46 pytest tests, mostly tiny hand-checkable examples, plus end-to-end tests.
 - The Streamlit dashboard **only reads** the job's output: score and GO / NO-GO on the side, flow, pressure and score
   against time, and hovering shows the score at any moment.
 

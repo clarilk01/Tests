@@ -1,4 +1,4 @@
-"""Command-line entry point. Safe to schedule (e.g. daily).
+"""Command-line entry point.
 
     python -m gel_performance.run --input data/synthetic/cycles.csv --output output/ [--config config/config.yaml]
 
@@ -131,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     except (DataError, ReferenceWindowError) as exc:
         log.error("Input data problem: %s", exc)
         return EXIT_DATA
-    except Exception:  # noqa: BLE001 - a scheduled job must log every failure, not crash silently
+    except Exception:  # noqa: BLE001 - log every failure, never crash silently
         log.exception("Unexpected error")
         return EXIT_UNEXPECTED
     finally:
