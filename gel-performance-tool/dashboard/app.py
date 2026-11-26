@@ -127,6 +127,11 @@ with main:
             legendgroup="rm", showlegend=(r == 1), line=dict(color=LINE, width=2), customdata=custom,
             hovertemplate=f"%{{x|%Y-%m-%d %H:%M}}<br>rolling mean %{{y:.2f}} {unit}" + hover_extra,
         ), row=r, col=1)
+        fig.add_trace(go.Scatter(
+            x=view["cycle_end_time"], y=view["resin_age"], mode="lines", line_shape="hv",
+            name="gel age (cycles)", line=dict(color="gray", width=1.5, dash="dot"),
+            hovertemplate="%{x|%Y-%m-%d %H:%M}<br>gel age %{y} cycles<extra></extra>",
+        ), row=1, col=1, secondary_y=True)
 
     fig.add_hline(y=tc.pressure_limit_bar, row=2, col=1, line=dict(color=RED, width=1.5, dash="dash"),
                   annotation_text=f"limit {tc.pressure_limit_bar:.2f} bar", annotation_position="top left",
