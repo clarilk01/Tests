@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gel-performance"
+version = "0.1.0"
+description = "Synthetic-data demo: GO / NO-GO decision tree for chromatography resin replacement."
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26", "pandas>=2.1", "pyyaml>=6.0"]
+
+[project.optional-dependencies]
+dashboard = ["streamlit>=1.50", "plotly>=5.19"]
+train = ["scikit-learn>=1.4"]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
